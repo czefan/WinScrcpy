@@ -9,8 +9,6 @@ using System.Windows.Forms;
 
 internal static class UiTheme
 {
-    public static readonly float DpiScale = DetectDpiScale();
-
     public static readonly Font BodyFont = new Font("Microsoft YaHei UI", 13f, FontStyle.Regular);
     public static readonly Font BodyBoldFont = new Font("Microsoft YaHei UI", 13f, FontStyle.Bold);
     public static readonly Font TitleFont = new Font("Microsoft YaHei UI", 14f, FontStyle.Bold);
@@ -125,35 +123,26 @@ internal static class UiTheme
         }
     }
 
-    static float DetectDpiScale()
+    public static float GetDpiScale(Control control)
     {
-        try
-        {
-            using (Graphics g = Graphics.FromHwnd(IntPtr.Zero))
-            {
-                float ratio = g.DpiX / 96f;
-                return ratio < 1f ? 1f : ratio;
-            }
-        }
-        catch (Exception)
-        {
-            return 1f;
-        }
+        if (control == null || control.DeviceDpi <= 0) return 1f;
+        float ratio = control.DeviceDpi / 96f;
+        return ratio < 1f ? 1f : ratio;
     }
 
-    public static int Scale(int px)
+    public static int Scale(Control control, int dp)
     {
-        return (int)Math.Round(px * DpiScale);
+        return control != null ? control.LogicalToDeviceUnits(dp) : dp;
     }
 
-    public static Size Size(int w, int h)
+    public static Size Size(Control control, int w, int h)
     {
-        return new Size(Scale(w), Scale(h));
+        return control != null ? control.LogicalToDeviceUnits(new Size(w, h)) : new Size(w, h);
     }
 
-    public static Padding Pad(int left, int top, int right, int bottom)
+    public static Padding Pad(Control control, int left, int top, int right, int bottom)
     {
-        return new Padding(Scale(left), Scale(top), Scale(right), Scale(bottom));
+        return new Padding(Scale(control, left), Scale(control, top), Scale(control, right), Scale(control, bottom));
     }
 
     public static GraphicsPath CreateRoundedRect(RectangleF bounds, float radius)
@@ -202,8 +191,7 @@ internal static class UiTheme
         if (dialog == null) return DialogResult.Cancel;
         if (owner != null)
         {
-            dialog.StartPosition = FormStartPosition.Manual;
-            CenterOnForm(owner, dialog);
+            dialog.StartPosition = FormStartPosition.CenterParent;
         }
         return dialog.ShowDialog(owner);
     }
@@ -259,8 +247,8 @@ internal sealed class ModernButton : Button
             Font,
             new Size(int.MaxValue, int.MaxValue),
             TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
-        int w = textSize.Width + UiTheme.Scale(24);
-        int h = Math.Max(UiTheme.Scale(32), textSize.Height + UiTheme.Scale(12));
+        int w = textSize.Width + LogicalToDeviceUnits(24);
+        int h = Math.Max(LogicalToDeviceUnits(32), textSize.Height + LogicalToDeviceUnits(12));
         return new Size(w, h);
     }
 
@@ -334,7 +322,7 @@ internal sealed class ModernButton : Button
         }
 
         RectangleF rect = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f);
-        float radius = UiTheme.Scale(7);
+        float radius = LogicalToDeviceUnits(7);
         using (GraphicsPath path = UiTheme.CreateRoundedRect(rect, radius))
         using (SolidBrush brush = new SolidBrush(fill))
         using (Pen pen = new Pen(border, 1f))
@@ -408,7 +396,7 @@ internal sealed class PillBadge : Label
             Font,
             new Size(int.MaxValue, int.MaxValue),
             TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
-        return new Size(textSize.Width + UiTheme.Scale(18), textSize.Height + UiTheme.Scale(8));
+        return new Size(textSize.Width + LogicalToDeviceUnits(18), textSize.Height + LogicalToDeviceUnits(8));
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -418,7 +406,7 @@ internal sealed class PillBadge : Label
         e.Graphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
         RectangleF rect = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f);
-        using (GraphicsPath path = UiTheme.CreateRoundedRect(rect, UiTheme.Scale(6)))
+        using (GraphicsPath path = UiTheme.CreateRoundedRect(rect, LogicalToDeviceUnits(6)))
         using (SolidBrush brush = new SolidBrush(pillBg))
         {
             e.Graphics.FillPath(brush, path);
@@ -438,13 +426,13 @@ internal class RoundedPanel : TableLayoutPanel
 {
     public Color CardBg;
     public Color BorderLineColor;
-    public int CornerRadius;
+    public int CornerRadiusDp;
 
     public RoundedPanel()
     {
         CardBg = UiTheme.SurfaceBg;
         BorderLineColor = UiTheme.BorderColor;
-        CornerRadius = UiTheme.Scale(8);
+        CornerRadiusDp = 8;
         BackColor = UiTheme.SurfaceBg;
         DoubleBuffered = true;
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
@@ -456,7 +444,7 @@ internal class RoundedPanel : TableLayoutPanel
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
 
         RectangleF rect = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f);
-        using (GraphicsPath path = UiTheme.CreateRoundedRect(rect, CornerRadius))
+        using (GraphicsPath path = UiTheme.CreateRoundedRect(rect, LogicalToDeviceUnits(CornerRadiusDp)))
         using (SolidBrush brush = new SolidBrush(CardBg))
         using (Pen pen = new Pen(BorderLineColor, 1f))
         {
@@ -474,7 +462,7 @@ internal sealed class ModernTextBoxHost : RoundedPanel
     public ModernTextBoxHost(string placeholder)
     {
         this.placeholder = placeholder ?? "";
-        CornerRadius = UiTheme.Scale(6);
+        CornerRadiusDp = 6;
         BorderLineColor = UiTheme.InputBorder;
         CardBg = Color.White;
         BackColor = Color.White;
@@ -482,7 +470,7 @@ internal sealed class ModernTextBoxHost : RoundedPanel
         RowCount = 1;
         ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        Padding = UiTheme.Pad(10, 7, 10, 7);
+        Padding = new Padding(10, 7, 10, 7);
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
 
@@ -494,9 +482,7 @@ internal sealed class ModernTextBoxHost : RoundedPanel
         InnerBox.BackColor = Color.White;
         InnerBox.Anchor = AnchorStyles.Left | AnchorStyles.Right;
         InnerBox.Margin = new Padding(0);
-        int boxHeight = Math.Max(InnerBox.PreferredSize.Height, TextRenderer.MeasureText("测gy", UiTheme.BodyFont).Height + 2);
-        InnerBox.Height = boxHeight;
-        InnerBox.MinimumSize = new Size(0, boxHeight);
+        UpdateInputHeight();
 
         if (this.placeholder.Length > 0)
         {
@@ -526,6 +512,31 @@ internal sealed class ModernTextBoxHost : RoundedPanel
         Click += delegate { InnerBox.Focus(); };
     }
 
+    protected override void OnFontChanged(EventArgs e)
+    {
+        base.OnFontChanged(e);
+        if (InnerBox != null)
+        {
+            InnerBox.Font = Font;
+            UpdateInputHeight();
+        }
+    }
+
+    protected override void OnDpiChangedAfterParent(EventArgs e)
+    {
+        base.OnDpiChangedAfterParent(e);
+        UpdateInputHeight();
+    }
+
+    void UpdateInputHeight()
+    {
+        if (InnerBox == null) return;
+        Font activeFont = InnerBox.Font ?? UiTheme.BodyFont;
+        int boxHeight = Math.Max(InnerBox.PreferredSize.Height, TextRenderer.MeasureText("测gy", activeFont).Height + 2);
+        InnerBox.Height = boxHeight;
+        InnerBox.MinimumSize = new Size(0, boxHeight);
+    }
+
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public string TextValue
     {
@@ -542,7 +553,7 @@ internal sealed class ModernCheckBox : CheckBox
     {
         AutoSize = false;
         Text = "";
-        Size = UiTheme.Size(22, 22);
+        Size = new Size(22, 22);
         Cursor = Cursors.Hand;
         BackColor = UiTheme.SurfaceBg;
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
@@ -550,7 +561,22 @@ internal sealed class ModernCheckBox : CheckBox
 
     public override Size GetPreferredSize(Size proposedSize)
     {
-        return UiTheme.Size(22, 22);
+        return LogicalToDeviceUnits(new Size(22, 22));
+    }
+
+    protected override void OnParentChanged(EventArgs e)
+    {
+        base.OnParentChanged(e);
+        if (Parent != null)
+        {
+            Size = LogicalToDeviceUnits(new Size(22, 22));
+        }
+    }
+
+    protected override void OnDpiChangedAfterParent(EventArgs e)
+    {
+        base.OnDpiChangedAfterParent(e);
+        Size = LogicalToDeviceUnits(new Size(22, 22));
     }
 
     protected override void OnMouseEnter(EventArgs e)
@@ -590,11 +616,12 @@ internal sealed class ModernCheckBox : CheckBox
         pevent.Graphics.Clear(UiTheme.ResolveParentBg(Parent, UiTheme.SurfaceBg));
         pevent.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
 
-        float boxSize = UiTheme.Scale(18);
+        float boxSize = LogicalToDeviceUnits(18);
         float x = (Width - boxSize) / 2f;
         float y = (Height - boxSize) / 2f;
         RectangleF rect = new RectangleF(x, y, boxSize, boxSize);
-        float radius = UiTheme.Scale(5);
+        float radius = LogicalToDeviceUnits(5);
+        float dpiScale = UiTheme.GetDpiScale(this);
 
         Color fill;
         Color border;
@@ -616,7 +643,7 @@ internal sealed class ModernCheckBox : CheckBox
 
         using (GraphicsPath path = UiTheme.CreateRoundedRect(rect, radius))
         using (SolidBrush brush = new SolidBrush(fill))
-        using (Pen pen = new Pen(border, Math.Max(1.4f, UiTheme.DpiScale * 1.1f)))
+        using (Pen pen = new Pen(border, Math.Max(1.4f, dpiScale * 1.1f)))
         {
             pevent.Graphics.FillPath(brush, path);
             pevent.Graphics.DrawPath(pen, path);
@@ -624,7 +651,7 @@ internal sealed class ModernCheckBox : CheckBox
 
         if (Checked)
         {
-            using (Pen checkPen = new Pen(Color.White, Math.Max(2f, UiTheme.DpiScale * 1.5f)))
+            using (Pen checkPen = new Pen(Color.White, Math.Max(2f, dpiScale * 1.5f)))
             {
                 checkPen.StartCap = LineCap.Round;
                 checkPen.EndCap = LineCap.Round;
@@ -639,7 +666,7 @@ internal sealed class ModernCheckBox : CheckBox
         if (Focused && ShowFocusCues && Enabled)
         {
             RectangleF focusRect = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f);
-            using (GraphicsPath focusPath = UiTheme.CreateRoundedRect(focusRect, UiTheme.Scale(5)))
+            using (GraphicsPath focusPath = UiTheme.CreateRoundedRect(focusRect, LogicalToDeviceUnits(5)))
             using (Pen focusPen = new Pen(UiTheme.AccentBlue, 1f))
             {
                 focusPen.DashStyle = DashStyle.Dot;
@@ -671,16 +698,22 @@ internal sealed class SelectableTextLabel : TextBox
 
     public void ConstrainWidth(int maxWidth)
     {
-        int newLimit = Math.Max(UiTheme.Scale(80), maxWidth);
+        int newLimit = Math.Max(LogicalToDeviceUnits(80), maxWidth);
         if (newLimit == maxWrapWidth && Width > 0 && Height > 0) return;
         maxWrapWidth = newLimit;
+        UpdateMeasuredBounds();
+    }
+
+    protected override void OnDpiChangedAfterParent(EventArgs e)
+    {
+        base.OnDpiChangedAfterParent(e);
         UpdateMeasuredBounds();
     }
 
     public void UpdateMeasuredBounds()
     {
         string content = string.IsNullOrEmpty(Text) ? " " : Text;
-        int limit = maxWrapWidth > 0 ? maxWrapWidth : UiTheme.Scale(480);
+        int limit = maxWrapWidth > 0 ? maxWrapWidth : LogicalToDeviceUnits(480);
         if (!Multiline)
         {
             Size single = TextRenderer.MeasureText(
@@ -688,21 +721,21 @@ internal sealed class SelectableTextLabel : TextBox
                 Font,
                 new Size(int.MaxValue, int.MaxValue),
                 TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
-            int w = Math.Min(limit, single.Width + UiTheme.Scale(8));
-            Size = new Size(Math.Max(UiTheme.Scale(20), w), single.Height + UiTheme.Scale(2));
+            int w = Math.Min(limit, single.Width + LogicalToDeviceUnits(8));
+            Size = new Size(Math.Max(LogicalToDeviceUnits(20), w), single.Height + LogicalToDeviceUnits(2));
             return;
         }
 
         // 先按略窄于容器的宽度测高，再留出 EDIT 控件内边距宽度，避免最后一行在 TextBox 内意外多折出半行。
-        int measureLimit = Math.Max(UiTheme.Scale(60), limit - UiTheme.Scale(10));
+        int measureLimit = Math.Max(LogicalToDeviceUnits(60), limit - LogicalToDeviceUnits(10));
         Size wrapped = TextRenderer.MeasureText(
             content,
             Font,
             new Size(measureLimit, int.MaxValue),
             TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix);
-        int finalWidth = Math.Min(limit, wrapped.Width + UiTheme.Scale(12));
-        int finalHeight = wrapped.Height + UiTheme.Scale(4);
-        Size = new Size(Math.Max(UiTheme.Scale(20), finalWidth), Math.Max(UiTheme.Scale(20), finalHeight));
+        int finalWidth = Math.Min(limit, wrapped.Width + LogicalToDeviceUnits(12));
+        int finalHeight = wrapped.Height + LogicalToDeviceUnits(4);
+        Size = new Size(Math.Max(LogicalToDeviceUnits(20), finalWidth), Math.Max(LogicalToDeviceUnits(20), finalHeight));
     }
 
     public override Size GetPreferredSize(Size proposedSize)

@@ -6,6 +6,7 @@ using System.Windows.Forms;
 internal sealed class SavedEndpointsDialog : Form
 {
     internal readonly DataGridView grid;
+    readonly TableLayoutPanel layout;
     readonly Label statusLabel;
     readonly Button addButton;
     readonly Button removeButton;
@@ -28,7 +29,6 @@ internal sealed class SavedEndpointsDialog : Form
         StartPosition = FormStartPosition.CenterParent;
         MaximizeBox = false;
         MinimizeBox = false;
-        AutoScaleMode = AutoScaleMode.None;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
         BackColor = UiTheme.PageBg;
@@ -47,28 +47,25 @@ internal sealed class SavedEndpointsDialog : Form
 
         SuspendLayout();
 
-        TableLayoutPanel layout = new BufferedTableLayoutPanel();
+        layout = new BufferedTableLayoutPanel();
         layout.AutoSize = true;
         layout.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         layout.ColumnCount = 1;
         layout.RowCount = 4;
-        layout.Padding = UiTheme.Pad(20, 18, 20, 18);
+        layout.Padding = new Padding(20, 18, 20, 18);
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
         Label tipLabel = new Label();
         tipLabel.AutoSize = true;
-        tipLabel.MaximumSize = new Size(UiTheme.Scale(540), 0);
+        tipLabel.MaximumSize = new Size(540, 0);
         tipLabel.Font = UiTheme.SubFont;
         tipLabel.ForeColor = UiTheme.TextSecondary;
-        tipLabel.Margin = UiTheme.Pad(0, 0, 0, 12);
+        tipLabel.Margin = new Padding(0, 0, 0, 12);
         tipLabel.Text = "维护常用无线地址（不填端口默认 :5555）及显示名称，双击或选中直接输入即可修改：";
         layout.Controls.Add(tipLabel, 0, 0);
 
-        int headerTextH = TextRenderer.MeasureText("地址", UiTheme.BodyBoldFont).Height;
-        int cellTextH = TextRenderer.MeasureText("192.168.3.12:5555", UiTheme.BodyFont).Height;
-
         grid = new BufferedDataGridView();
-        grid.Size = UiTheme.Size(540, 250);
+        grid.Size = new Size(540, 250);
         grid.Margin = new Padding(0);
         grid.BackgroundColor = UiTheme.SurfaceBg;
         grid.BorderStyle = BorderStyle.None;
@@ -85,22 +82,18 @@ internal sealed class SavedEndpointsDialog : Form
         grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         grid.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.Single;
         grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
-        grid.ColumnHeadersHeight = Math.Max(UiTheme.Scale(38), headerTextH + UiTheme.Scale(16));
-        grid.RowTemplate.Height = Math.Max(UiTheme.Scale(40), cellTextH + UiTheme.Scale(22));
 
         grid.ColumnHeadersDefaultCellStyle.BackColor = UiTheme.PageBg;
         grid.ColumnHeadersDefaultCellStyle.ForeColor = UiTheme.TextPrimary;
         grid.ColumnHeadersDefaultCellStyle.Font = UiTheme.BodyBoldFont;
         grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = UiTheme.PageBg;
         grid.ColumnHeadersDefaultCellStyle.SelectionForeColor = UiTheme.TextPrimary;
-        grid.ColumnHeadersDefaultCellStyle.Padding = UiTheme.Pad(8, 4, 8, 4);
 
         grid.DefaultCellStyle.Font = UiTheme.BodyFont;
         grid.DefaultCellStyle.BackColor = UiTheme.SurfaceBg;
         grid.DefaultCellStyle.ForeColor = UiTheme.TextPrimary;
         grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(228, 241, 255);
         grid.DefaultCellStyle.SelectionForeColor = UiTheme.TextPrimary;
-        grid.DefaultCellStyle.Padding = UiTheme.Pad(8, 3, 8, 3);
 
         DataGridViewTextBoxColumn epCol = new DataGridViewTextBoxColumn();
         epCol.Name = "Endpoint";
@@ -123,21 +116,20 @@ internal sealed class SavedEndpointsDialog : Form
         gridFrame.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         gridFrame.BackColor = UiTheme.InputBorder;
         gridFrame.Padding = new Padding(1);
-        gridFrame.Margin = UiTheme.Pad(0, 0, 0, 10);
+        gridFrame.Margin = new Padding(0, 0, 0, 10);
         gridFrame.Controls.Add(grid);
         layout.Controls.Add(gridFrame, 0, 1);
 
         statusLabel = new Label();
         statusLabel.AutoSize = true;
-        statusLabel.MaximumSize = new Size(UiTheme.Scale(540), 0);
+        statusLabel.MaximumSize = new Size(540, 0);
         statusLabel.Font = UiTheme.SubFont;
         statusLabel.ForeColor = UiTheme.TextSecondary;
-        statusLabel.Margin = UiTheme.Pad(0, 0, 0, 12);
+        statusLabel.Margin = new Padding(0, 0, 0, 12);
         statusLabel.Text = " ";
         layout.Controls.Add(statusLabel, 0, 2);
 
         TableLayoutPanel footer = new BufferedTableLayoutPanel();
-        footer.Width = gridFrame.PreferredSize.Width;
         footer.AutoSize = true;
         footer.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         footer.Anchor = AnchorStyles.Left | AnchorStyles.Right;
@@ -155,7 +147,7 @@ internal sealed class SavedEndpointsDialog : Form
         leftActions.Margin = new Padding(0);
 
         addButton = UiTheme.MakeToolButton("新增");
-        addButton.Margin = UiTheme.Pad(0, 0, 8, 0);
+        addButton.Margin = new Padding(0, 0, 8, 0);
         addButton.Click += OnAddClick;
 
         removeButton = UiTheme.MakeToolButton("删除选中");
@@ -174,7 +166,7 @@ internal sealed class SavedEndpointsDialog : Form
 
         cancelButton = UiTheme.MakeToolButton("取消");
         cancelButton.DialogResult = DialogResult.Cancel;
-        cancelButton.Margin = UiTheme.Pad(0, 0, 8, 0);
+        cancelButton.Margin = new Padding(0, 0, 8, 0);
         cancelButton.Click += delegate
         {
             DialogResult = DialogResult.Cancel;
@@ -196,9 +188,28 @@ internal sealed class SavedEndpointsDialog : Form
         CancelButton = cancelButton;
         LoadRowsFromConfig();
 
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
         ResumeLayout(false);
+        ApplyGridDpiMetrics();
         PerformLayout();
-        ClientSize = layout.GetPreferredSize(Size.Empty);
+    }
+
+    void ApplyGridDpiMetrics()
+    {
+        Font headerFont = grid.ColumnHeadersDefaultCellStyle.Font ?? Font;
+        Font cellFont = grid.DefaultCellStyle.Font ?? Font;
+        int headerTextH = TextRenderer.MeasureText("地址", headerFont).Height;
+        int cellTextH = TextRenderer.MeasureText("192.168.3.12:5555", cellFont).Height;
+
+        grid.ColumnHeadersHeight = Math.Max(UiTheme.Scale(grid, 38), headerTextH + UiTheme.Scale(grid, 16));
+        grid.RowTemplate.Height = Math.Max(UiTheme.Scale(grid, 40), cellTextH + UiTheme.Scale(grid, 22));
+        grid.ColumnHeadersDefaultCellStyle.Padding = UiTheme.Pad(grid, 8, 4, 8, 4);
+        grid.DefaultCellStyle.Padding = UiTheme.Pad(grid, 8, 3, 8, 3);
+        for (int i = 0; i < grid.Rows.Count; i++)
+        {
+            grid.Rows[i].Height = grid.RowTemplate.Height;
+        }
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -211,9 +222,21 @@ internal sealed class SavedEndpointsDialog : Form
     {
         base.OnLoad(e);
         SuspendLayout();
+        ApplyGridDpiMetrics();
         PerformLayout();
         ResumeLayout(false);
+        ClientSize = layout.GetPreferredSize(Size.Empty);
         UiTheme.CenterOnOwner(this);
+    }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        SuspendLayout();
+        ApplyGridDpiMetrics();
+        PerformLayout();
+        ResumeLayout(false);
+        ClientSize = layout.GetPreferredSize(Size.Empty);
     }
 
     protected override void OnShown(EventArgs e)

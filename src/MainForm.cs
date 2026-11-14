@@ -36,6 +36,7 @@ internal sealed class MainForm : Form
     Control activeTableCard;
     readonly List<CheckBox> rowCheckBoxes = new List<CheckBox>();
     readonly List<PairingServiceInfo> lastPairingServices = new List<PairingServiceInfo>();
+    ScanResult lastScanResult;
     Color statusDotColor = UiTheme.StatusGreen;
     bool isActionBusy;
     bool isScanning;
@@ -56,9 +57,9 @@ internal sealed class MainForm : Form
 
         Text = "WinScrcpy";
         UiTheme.ApplyWindowIcon(this);
-        AutoScaleMode = AutoScaleMode.None;
-        ClientSize = UiTheme.Size(780, 520);
-        MinimumSize = UiTheme.Size(660, 400);
+        SuspendLayout();
+        ClientSize = new Size(780, 520);
+        MinimumSize = new Size(660, 400);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = UiTheme.PageBg;
         Font = UiTheme.BodyFont;
@@ -73,7 +74,7 @@ internal sealed class MainForm : Form
         topBar.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         topBar.ColumnCount = 3;
         topBar.RowCount = 1;
-        topBar.Padding = UiTheme.Pad(18, 10, 18, 10);
+        topBar.Padding = new Padding(18, 10, 18, 10);
         topBar.BackColor = UiTheme.SurfaceBg;
         topBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         topBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
@@ -89,11 +90,11 @@ internal sealed class MainForm : Form
         topLeftFlow.Margin = new Padding(0);
 
         refreshBtn = UiTheme.MakeToolButton("扫描 (F5)");
-        refreshBtn.Margin = UiTheme.Pad(0, 0, 8, 0);
+        refreshBtn.Margin = new Padding(0, 0, 8, 0);
         refreshBtn.Click += delegate { StartScan(); };
 
         pairBtn = UiTheme.MakeToolButton("无线配对…");
-        pairBtn.Margin = UiTheme.Pad(0, 0, 8, 0);
+        pairBtn.Margin = new Padding(0, 0, 8, 0);
         pairBtn.Click += OnOpenPairDialog;
 
         manualBtn = UiTheme.MakeToolButton("手动连接…");
@@ -113,7 +114,7 @@ internal sealed class MainForm : Form
         topRightFlow.Margin = new Padding(0);
 
         connectSelectedBtn = UiTheme.MakePrimaryButton("投屏所选 (0)");
-        connectSelectedBtn.Margin = UiTheme.Pad(0, 0, 8, 0);
+        connectSelectedBtn.Margin = new Padding(0, 0, 8, 0);
         connectSelectedBtn.Visible = false;
         connectSelectedBtn.Click += OnConnectSelectedClick;
 
@@ -167,7 +168,7 @@ internal sealed class MainForm : Form
         listHost.Dock = DockStyle.Fill;
         listHost.AutoScroll = true;
         listHost.BackColor = UiTheme.PageBg;
-        listHost.Padding = UiTheme.Pad(18, 16, 18, 16);
+        listHost.Padding = new Padding(18, 16, 18, 16);
         listHost.Resize += delegate { RelayoutCards(); };
 
         Panel statusBorder = new Panel();
@@ -182,15 +183,15 @@ internal sealed class MainForm : Form
         statusBar.ColumnCount = 2;
         statusBar.RowCount = 1;
         statusBar.BackColor = UiTheme.StatusBg;
-        statusBar.Padding = UiTheme.Pad(18, 8, 18, 8);
+        statusBar.Padding = new Padding(18, 8, 18, 8);
         statusBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         statusBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         statusBar.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         statusDot = new Panel();
-        statusDot.Size = UiTheme.Size(9, 9);
+        statusDot.Size = new Size(9, 9);
         statusDot.Anchor = AnchorStyles.Left;
-        statusDot.Margin = UiTheme.Pad(0, 0, 8, 0);
+        statusDot.Margin = new Padding(0, 0, 8, 0);
         statusDot.Paint += delegate(object s, PaintEventArgs e)
         {
             e.Graphics.Clear(UiTheme.StatusBg);
@@ -225,10 +226,70 @@ internal sealed class MainForm : Form
         Controls.Add(statusBorder);
         Controls.Add(statusBar);
 
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        ResumeLayout(false);
+        PerformLayout();
+
         FormClosing += delegate { CancelAllBackgroundWork(); };
         if (autoScanOnShow)
         {
             Shown += delegate { StartScan(); };
+        }
+    }
+
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        if (statusLabel != null)
+        {
+            statusLabel.Height = statusLabel.PreferredHeight;
+        }
+    }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        if (statusLabel != null)
+        {
+            statusLabel.Height = statusLabel.PreferredHeight;
+        }
+        if (lastScanResult != null)
+        {
+            HashSet<DeviceItem> checkedItems = new HashSet<DeviceItem>();
+            for (int i = 0; i < rowCheckBoxes.Count; i++)
+            {
+                DeviceItem item = rowCheckBoxes[i].Tag as DeviceItem;
+                if (rowCheckBoxes[i].Checked && item != null)
+                {
+                    checkedItems.Add(item);
+                }
+            }
+            ApplyScanResult(lastScanResult);
+            if (checkedItems.Count > 0)
+            {
+                syncingCheckBoxes = true;
+                try
+                {
+                    for (int i = 0; i < rowCheckBoxes.Count; i++)
+                    {
+                        DeviceItem item = rowCheckBoxes[i].Tag as DeviceItem;
+                        if (item != null && checkedItems.Contains(item))
+                        {
+                            rowCheckBoxes[i].Checked = true;
+                        }
+                    }
+                }
+                finally
+                {
+                    syncingCheckBoxes = false;
+                }
+                SyncSelectionState();
+            }
+        }
+        else if (listHost.Controls.Count > 0)
+        {
+            ApplyScanResult(new ScanResult());
         }
     }
 
@@ -276,7 +337,7 @@ internal sealed class MainForm : Form
     void OnMoreButtonClick(object sender, EventArgs e)
     {
         if (isBusy) return;
-        Point pt = new Point(moreBtn.Width - moreMenu.PreferredSize.Width, moreBtn.Height + UiTheme.Scale(4));
+        Point pt = new Point(moreBtn.Width - moreMenu.PreferredSize.Width, moreBtn.Height + moreBtn.LogicalToDeviceUnits(4));
         if (pt.X < -moreBtn.Left) pt.X = 0;
         moreMenu.Show(moreBtn, pt);
     }
@@ -607,6 +668,7 @@ internal sealed class MainForm : Form
 
     void ApplyScanResult(ScanResult result)
     {
+        lastScanResult = result;
         lastPairingServices.Clear();
         if (result.PairingServices != null)
         {
@@ -667,10 +729,10 @@ internal sealed class MainForm : Form
         RoundedPanel card = new RoundedPanel();
         card.AutoSize = true;
         card.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        card.CornerRadius = UiTheme.Scale(12);
+        card.CornerRadiusDp = 12;
         card.ColumnCount = 1;
         card.RowCount = 3;
-        card.Padding = UiTheme.Pad(30, 24, 30, 24);
+        card.Padding = UiTheme.Pad(listHost, 30, 24, 30, 24);
         card.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         card.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         card.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -681,14 +743,14 @@ internal sealed class MainForm : Form
         heading.Font = UiTheme.TitleFont;
         heading.ForeColor = UiTheme.TextPrimary;
         heading.Anchor = AnchorStyles.None;
-        heading.Margin = UiTheme.Pad(0, 0, 0, 10);
+        heading.Margin = UiTheme.Pad(listHost, 0, 0, 0, 10);
         heading.Text = "暂未检测到可用设备";
 
         Label tips = new Label();
         tips.AutoSize = true;
         tips.Font = UiTheme.SubFont;
         tips.ForeColor = UiTheme.TextSecondary;
-        tips.Margin = UiTheme.Pad(0, 0, 0, 18);
+        tips.Margin = UiTheme.Pad(listHost, 0, 0, 0, 18);
         tips.Text = "• 有线：插入 USB 并在手机确认「允许调试」\n• 无线：开启手机「无线调试」并确保与电脑在同一局域网\n• 首次配对或手动直连：点击左上角「无线配对…」或「手动连接…」";
 
         Button emptyScanBtn = UiTheme.MakePrimaryButton("立即扫描设备");
@@ -710,10 +772,10 @@ internal sealed class MainForm : Form
         tableCard.SuspendLayout();
         tableCard.AutoSize = true;
         tableCard.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        tableCard.CornerRadius = UiTheme.Scale(12);
+        tableCard.CornerRadiusDp = 12;
         tableCard.CardBg = UiTheme.SurfaceBg;
         tableCard.BorderLineColor = UiTheme.BorderColor;
-        tableCard.Padding = UiTheme.Pad(1, 6, 1, 6);
+        tableCard.Padding = UiTheme.Pad(listHost, 1, 6, 1, 6);
         tableCard.Margin = new Padding(0);
         tableCard.ColumnCount = 1;
         tableCard.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
@@ -726,7 +788,7 @@ internal sealed class MainForm : Form
         headerRow.BackColor = UiTheme.SurfaceBg;
         headerRow.ColumnCount = 3;
         headerRow.RowCount = 1;
-        headerRow.Padding = UiTheme.Pad(16, 7, 16, 8);
+        headerRow.Padding = UiTheme.Pad(listHost, 16, 7, 16, 8);
         headerRow.Margin = new Padding(0);
         headerRow.Tag = "TableHeaderRow";
         headerRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -736,7 +798,7 @@ internal sealed class MainForm : Form
 
         selectAllCheck = new ModernCheckBox();
         selectAllCheck.Anchor = AnchorStyles.Left;
-        selectAllCheck.Margin = UiTheme.Pad(0, 0, 12, 0);
+        selectAllCheck.Margin = UiTheme.Pad(listHost, 0, 0, 12, 0);
         selectAllCheck.CheckedChanged += OnSelectAllCheckedChanged;
 
         Label headerDeviceLbl = new Label();
@@ -781,7 +843,7 @@ internal sealed class MainForm : Form
                 insetDivider.Height = 1;
                 insetDivider.Dock = DockStyle.Fill;
                 insetDivider.BackColor = UiTheme.BorderColor;
-                insetDivider.Margin = UiTheme.Pad(16, 0, 16, 0);
+                insetDivider.Margin = UiTheme.Pad(listHost, 16, 0, 16, 0);
                 tableCard.RowStyles.Add(new RowStyle(SizeType.AutoSize));
                 tableCard.Controls.Add(insetDivider, 0, rowIndex++);
             }
@@ -808,7 +870,7 @@ internal sealed class MainForm : Form
         row.BackColor = UiTheme.SurfaceBg;
         row.ColumnCount = 3;
         row.RowCount = 1;
-        row.Padding = UiTheme.Pad(16, 13, 16, 13);
+        row.Padding = UiTheme.Pad(listHost, 16, 13, 16, 13);
         row.Margin = new Padding(0);
         row.Tag = item;
         row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -818,7 +880,7 @@ internal sealed class MainForm : Form
 
         ModernCheckBox cb = new ModernCheckBox();
         cb.Anchor = AnchorStyles.Left;
-        cb.Margin = UiTheme.Pad(0, 0, 12, 0);
+        cb.Margin = UiTheme.Pad(listHost, 0, 0, 12, 0);
         cb.Enabled = item.CanConnect;
         cb.Tag = item;
         cb.CheckedChanged += delegate { if (!syncingCheckBoxes) SyncSelectionState(); };
@@ -832,7 +894,7 @@ internal sealed class MainForm : Form
         infoTable.BackColor = UiTheme.SurfaceBg;
         infoTable.ColumnCount = 1;
         infoTable.RowCount = 2;
-        infoTable.Margin = UiTheme.Pad(0, 0, 14, 0);
+        infoTable.Margin = UiTheme.Pad(listHost, 0, 0, 14, 0);
         infoTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         infoTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         infoTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -846,7 +908,7 @@ internal sealed class MainForm : Form
         headerFlow.Margin = new Padding(0);
 
         SelectableTextLabel titleLbl = new SelectableTextLabel(UiTheme.TitleFont, UiTheme.TextPrimary, UiTheme.SurfaceBg, true);
-        titleLbl.Margin = UiTheme.Pad(0, 2, 10, 0);
+        titleLbl.Margin = UiTheme.Pad(listHost, 0, 2, 10, 0);
         titleLbl.Anchor = AnchorStyles.Left;
         titleLbl.Text = title;
         titleLbl.UpdateMeasuredBounds();
@@ -860,7 +922,7 @@ internal sealed class MainForm : Form
         headerFlow.ResumeLayout(false);
 
         SelectableTextLabel subLbl = new SelectableTextLabel(UiTheme.SubFont, UiTheme.TextSecondary, UiTheme.SurfaceBg, true);
-        subLbl.Margin = UiTheme.Pad(0, 5, 0, 0);
+        subLbl.Margin = UiTheme.Pad(listHost, 0, 5, 0, 0);
         subLbl.Text = BuildSubText(item, resolved, title);
         subLbl.UpdateMeasuredBounds();
 
@@ -895,7 +957,7 @@ internal sealed class MainForm : Form
         }
 
         Button shotBtn = UiTheme.MakeToolButton("截屏");
-        shotBtn.Margin = UiTheme.Pad(0, 0, 8, 0);
+        shotBtn.Margin = UiTheme.Pad(listHost, 0, 0, 8, 0);
         shotBtn.Enabled = item.CanConnect;
         DeviceItem capturedForShot = item;
         string capturedTitle = title;
@@ -956,7 +1018,7 @@ internal sealed class MainForm : Form
             return;
         }
 
-        int availWidth = Math.Max(UiTheme.Scale(420), listHost.ClientSize.Width - listHost.Padding.Horizontal);
+        int availWidth = Math.Max(UiTheme.Scale(listHost, 420), listHost.ClientSize.Width - listHost.Padding.Horizontal);
         Control card = listHost.Controls[0];
         if (availWidth == lastLayoutWidth && card.Width == availWidth && !listHost.HorizontalScroll.Visible) return;
         lastLayoutWidth = availWidth;
@@ -964,7 +1026,7 @@ internal sealed class MainForm : Form
         int savedScrollY = Math.Max(0, -listHost.AutoScrollPosition.Y);
         listHost.SuspendLayout();
         card.SuspendLayout();
-        int innerRowWidth = Math.Max(UiTheme.Scale(380), availWidth - card.Padding.Horizontal);
+        int innerRowWidth = Math.Max(UiTheme.Scale(listHost, 380), availWidth - card.Padding.Horizontal);
         for (int i = 0; i < card.Controls.Count; i++)
         {
             Control child = card.Controls[i];
@@ -1001,7 +1063,7 @@ internal sealed class MainForm : Form
             }
         }
 
-        int afterScrollWidth = Math.Max(UiTheme.Scale(420), listHost.ClientSize.Width - listHost.Padding.Horizontal);
+        int afterScrollWidth = Math.Max(UiTheme.Scale(listHost, 420), listHost.ClientSize.Width - listHost.Padding.Horizontal);
         if (afterScrollWidth != availWidth && !inRelayout)
         {
             inRelayout = true;
@@ -1033,7 +1095,7 @@ internal sealed class MainForm : Form
 
         int leftWidth = tlp.Controls[0].PreferredSize.Width + tlp.Controls[0].Margin.Horizontal;
         int rightWidth = tlp.Controls[2].PreferredSize.Width + tlp.Controls[2].Margin.Horizontal;
-        int maxTextWidth = Math.Max(UiTheme.Scale(160), rowWidth - tlp.Padding.Horizontal - leftWidth - rightWidth - UiTheme.Scale(20));
+        int maxTextWidth = Math.Max(UiTheme.Scale(tlp, 160), rowWidth - tlp.Padding.Horizontal - leftWidth - rightWidth - UiTheme.Scale(tlp, 20));
 
         Control info = tlp.Controls[1];
         if (info.Controls.Count >= 2)
@@ -1044,7 +1106,7 @@ internal sealed class MainForm : Form
             if (titleLbl != null)
             {
                 int badgeSpace = badgeLbl != null ? (badgeLbl.PreferredSize.Width + badgeLbl.Margin.Horizontal + titleLbl.Margin.Horizontal) : 0;
-                titleLbl.ConstrainWidth(Math.Max(UiTheme.Scale(100), maxTextWidth - badgeSpace));
+                titleLbl.ConstrainWidth(Math.Max(UiTheme.Scale(tlp, 100), maxTextWidth - badgeSpace));
             }
             SelectableTextLabel subLbl = info.Controls[1] as SelectableTextLabel;
             if (subLbl != null) subLbl.ConstrainWidth(maxTextWidth);
@@ -1054,7 +1116,7 @@ internal sealed class MainForm : Form
     void AddWirelessActionButton(FlowLayoutPanel container, string text, DeviceItem item, string displayTitle, bool isDisconnecting, bool enabled)
     {
         Button btn = UiTheme.MakeToolButton(text);
-        btn.Margin = UiTheme.Pad(0, 0, 8, 0);
+        btn.Margin = UiTheme.Pad(container, 0, 0, 8, 0);
         btn.Enabled = enabled;
         btn.Click += delegate { ExecuteWirelessAction(item, displayTitle, isDisconnecting); };
         container.Controls.Add(btn);

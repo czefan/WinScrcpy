@@ -304,4 +304,65 @@ public sealed class CoreLogicTests
             && staleOffline.Devices[0].AdbSerial == ""
             && staleOffline.Devices[0].CandidateEndpoints[0] == "192.168.3.12:5555");
     }
+
+    [Fact]
+    public void ConfigManager_AtomicSaveCreatesBackup_AndPreservesCorruptedConfig()
+    {
+        Assert.Equal(Path.Combine(AppContext.BaseDirectory, "winscrcpy.json"), ConfigManager.DefaultConfigPath);
+
+        string tempDir = Path.Combine(Path.GetTempPath(), "winscrcpy_cfg_rel_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        string cfgPath = Path.Combine(tempDir, "winscrcpy.json");
+        try
+        {
+            ConfigManager mgr = new ConfigManager(cfgPath);
+            AppConfig first = AppConfig.CreateDefault();
+            ConfigManager.AddSavedEndpoint(first, "192.168.3.10:5555");
+            mgr.Save(first);
+
+            Assert.True(File.Exists(cfgPath));
+            Assert.False(File.Exists(mgr.BackupPath));
+            Assert.Empty(Directory.GetFiles(tempDir, "*.tmp"));
+
+            string firstJson = File.ReadAllText(cfgPath, Encoding.UTF8);
+
+            AppConfig second = AppConfig.CreateDefault();
+            ConfigManager.AddSavedEndpoint(second, "192.168.3.20:5555");
+            mgr.Save(second);
+
+            Assert.True(File.Exists(cfgPath));
+            Assert.True(File.Exists(mgr.BackupPath));
+            Assert.Equal(firstJson, File.ReadAllText(mgr.BackupPath, Encoding.UTF8));
+            Assert.Contains("192.168.3.20:5555", File.ReadAllText(cfgPath, Encoding.UTF8));
+            Assert.Empty(Directory.GetFiles(tempDir, "*.tmp"));
+
+            string brokenJson = "{ \"savedEndpoints\": [ broken";
+            File.WriteAllText(cfgPath, brokenJson, Encoding.UTF8);
+
+            AppConfig fallback = mgr.LoadOrCreate(out string warn);
+            Assert.NotNull(fallback);
+            Assert.False(string.IsNullOrEmpty(warn));
+            Assert.True(mgr.IsConfigCorrupted);
+            Assert.Equal(brokenJson, File.ReadAllText(cfgPath, Encoding.UTF8));
+
+            Assert.Throws<InvalidOperationException>(() => mgr.Save(fallback));
+            Assert.Equal(brokenJson, File.ReadAllText(cfgPath, Encoding.UTF8));
+            Assert.Equal(firstJson, File.ReadAllText(mgr.BackupPath, Encoding.UTF8));
+            Assert.Empty(Directory.GetFiles(tempDir, "*.tmp"));
+
+            // Repairing file and reloading clears the corrupted state so saving resumes cleanly.
+            File.WriteAllText(cfgPath, firstJson, Encoding.UTF8);
+            AppConfig recovered = mgr.LoadOrCreate(out string recoverWarn);
+            Assert.True(string.IsNullOrEmpty(recoverWarn));
+            Assert.False(mgr.IsConfigCorrupted);
+            ConfigManager.AddSavedEndpoint(recovered, "192.168.3.30:5555");
+            mgr.Save(recovered);
+            Assert.Contains("192.168.3.30:5555", File.ReadAllText(cfgPath, Encoding.UTF8));
+        }
+        finally
+        {
+            try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); }
+            catch { }
+        }
+    }
 }

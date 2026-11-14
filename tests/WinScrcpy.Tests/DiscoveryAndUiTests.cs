@@ -437,7 +437,7 @@ public sealed class DiscoveryAndUiTests
                     if (form.ActiveTableCard.Controls[r].Tag is DeviceItem) { savedRow = form.ActiveTableCard.Controls[r]; break; }
                 }
                 TableLayoutPanel infoTlp = savedRow.Controls[1] as TableLayoutPanel;
-                Assert.True(infoTlp != null && infoTlp.Height <= infoTlp.Controls[0].Height + infoTlp.Controls[1].Height + UiTheme.Scale(8));
+                Assert.True(infoTlp != null && infoTlp.Height <= infoTlp.Controls[0].Height + infoTlp.Controls[1].Height + UiTheme.Scale(form, 8));
                 Assert.True(savedTexts.Count == 2 && savedTexts[0].Text == "192.168.3.12:5555" && !savedTexts[1].Text.Contains("192.168.3.12:5555"));
                 UiTestHelpers.AssertAllControlsInTreeUnclipped(form);
 
@@ -471,7 +471,7 @@ public sealed class DiscoveryAndUiTests
                 Application.DoEvents();
                 Assert.Equal(qrTabSize, dlg.Size);
                 dlg.GetCodeSpacingForTest(out int gapTabToTip, out int gapTipToInput);
-                Assert.True(Math.Abs(gapTabToTip - gapTipToInput) <= UiTheme.Scale(2));
+                Assert.True(Math.Abs(gapTabToTip - gapTipToInput) <= UiTheme.Scale(dlg, 2));
                 UiTestHelpers.AssertAllControlsInTreeUnclipped(dlg);
                 dlg.Close();
             }
@@ -569,5 +569,29 @@ public sealed class DiscoveryAndUiTests
             try { if (Directory.Exists(previewDir)) Directory.Delete(previewDir, true); }
             catch { }
         }
+    }
+
+    [Fact]
+    public void UiLayout_HighDpiPerMonitorV2ConfiguredAndUsesControlDeviceDpi()
+    {
+        StaRunner.Run(() =>
+        {
+            Assert.Equal(HighDpiMode.PerMonitorV2, Application.HighDpiMode);
+
+            AppConfig cfg = AppConfig.CreateDefault();
+            ConfigManager mgr = new ConfigManager(Path.Combine(Path.GetTempPath(), "winscrcpy_dpi_" + Guid.NewGuid().ToString("N") + ".json"));
+            using (MainForm main = new MainForm(mgr, cfg, null, false))
+            using (PairDialog pair = new PairDialog(new AdbClient(cfg), null))
+            using (ManualConnectDialog connect = new ManualConnectDialog(new AdbClient(cfg)))
+            using (SavedEndpointsDialog saved = new SavedEndpointsDialog(mgr, cfg))
+            {
+                Assert.Equal(AutoScaleMode.Dpi, main.AutoScaleMode);
+                Assert.Equal(AutoScaleMode.Dpi, pair.AutoScaleMode);
+                Assert.Equal(AutoScaleMode.Dpi, connect.AutoScaleMode);
+                Assert.Equal(AutoScaleMode.Dpi, saved.AutoScaleMode);
+                Assert.Equal(main.LogicalToDeviceUnits(100), UiTheme.Scale(main, 100));
+                Assert.Equal(Math.Max(1f, main.DeviceDpi / 96f), UiTheme.GetDpiScale(main));
+            }
+        });
     }
 }

@@ -75,10 +75,16 @@ internal sealed class ConfigManager
     };
 
     public readonly string ConfigPath;
+    public bool IsConfigCorrupted { get; private set; }
+
+    public string BackupPath
+    {
+        get { return ConfigPath + ".bak"; }
+    }
 
     public static string DefaultConfigPath
     {
-        get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "winscrcpy.json"); }
+        get { return Path.Combine(AppContext.BaseDirectory, "winscrcpy.json"); }
     }
 
     public ConfigManager(string configPath)
@@ -91,6 +97,7 @@ internal sealed class ConfigManager
         warning = null;
         if (!File.Exists(ConfigPath))
         {
+            IsConfigCorrupted = false;
             AppConfig def = AppConfig.CreateDefault();
             try
             {
@@ -106,11 +113,14 @@ internal sealed class ConfigManager
         try
         {
             string json = File.ReadAllText(ConfigPath, Encoding.UTF8);
-            return ParseJson(json);
+            AppConfig parsed = ParseJson(json);
+            IsConfigCorrupted = false;
+            return parsed;
         }
         catch (Exception ex)
         {
-            warning = "配置文件解析失败，已回退默认配置: " + ex.Message;
+            IsConfigCorrupted = true;
+            warning = "配置文件解析失败，已保留原文件并回退默认配置（修复或删除原文件前不会自动覆盖）: " + ex.Message;
             return AppConfig.CreateDefault();
         }
     }
@@ -296,7 +306,50 @@ internal sealed class ConfigManager
         }
 
         string json = JsonSerializer.Serialize(normalized, WriteJsonOptions) + Environment.NewLine;
-        File.WriteAllText(ConfigPath, json, new UTF8Encoding(false));
+
+        if (IsConfigCorrupted && File.Exists(ConfigPath))
+        {
+            throw new InvalidOperationException("原配置文件已损坏，已保留原文件并阻止覆盖，请先修复或删除: " + ConfigPath);
+        }
+
+        string fullTargetPath = Path.GetFullPath(ConfigPath);
+        string dir = Path.GetDirectoryName(fullTargetPath);
+        if (!string.IsNullOrEmpty(dir))
+        {
+            Directory.CreateDirectory(dir);
+        }
+
+        string tempPath = Path.Combine(
+            dir ?? AppContext.BaseDirectory,
+            Path.GetFileName(fullTargetPath) + "." + Guid.NewGuid().ToString("N") + ".tmp");
+        try
+        {
+            using (FileStream fs = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            using (StreamWriter writer = new StreamWriter(fs, new UTF8Encoding(false)))
+            {
+                writer.Write(json);
+                writer.Flush();
+                fs.Flush(true);
+            }
+
+            if (File.Exists(fullTargetPath))
+            {
+                File.Replace(tempPath, fullTargetPath, BackupPath, ignoreMetadataErrors: true);
+            }
+            else
+            {
+                File.Move(tempPath, fullTargetPath);
+            }
+            IsConfigCorrupted = false;
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(tempPath)) File.Delete(tempPath);
+            }
+            catch (Exception) { }
+        }
     }
 
     public static ResolvedDeviceConfig Resolve(AppConfig config, DeviceItem item)

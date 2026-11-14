@@ -1,18 +1,12 @@
 using System;
-using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 internal static class Program
 {
-    [DllImport("user32.dll")]
-    static extern bool SetProcessDPIAware();
-
     [STAThread]
     static int Main()
     {
-        try { SetProcessDPIAware(); }
-        catch (Exception) { }
-
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);

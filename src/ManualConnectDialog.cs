@@ -32,7 +32,6 @@ internal sealed class ManualConnectDialog : Form
         StartPosition = FormStartPosition.CenterParent;
         MaximizeBox = false;
         MinimizeBox = false;
-        AutoScaleMode = AutoScaleMode.None;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
         BackColor = UiTheme.PageBg;
@@ -57,28 +56,28 @@ internal sealed class ManualConnectDialog : Form
         layout.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         layout.ColumnCount = 2;
         layout.RowCount = 5;
-        layout.Padding = UiTheme.Pad(20, 18, 20, 18);
+        layout.Padding = new Padding(20, 18, 20, 18);
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
         Label tipLabel = new Label();
         tipLabel.AutoSize = true;
-        tipLabel.MaximumSize = new Size(UiTheme.Scale(460), 0);
+        tipLabel.MaximumSize = new Size(460, 0);
         tipLabel.Font = UiTheme.SubFont;
         tipLabel.ForeColor = UiTheme.TextSecondary;
-        tipLabel.Margin = UiTheme.Pad(0, 0, 0, 14);
+        tipLabel.Margin = new Padding(0, 0, 0, 14);
         tipLabel.Text = "输入完整地址或使用快捷栏，点击「连接」执行单次手动连接：";
         layout.Controls.Add(tipLabel, 0, 0);
         layout.SetColumnSpan(tipLabel, 2);
 
-        Label epLabel = MakeInlineLabel("IP:Port", UiTheme.Pad(0, 0, 12, 12));
+        Label epLabel = MakeInlineLabel("IP:Port", new Padding(0, 0, 12, 12));
         layout.Controls.Add(epLabel, 0, 1);
 
         fullEndpointHost = new ModernTextBoxHost("例如 192.168.1.5:5555");
-        fullEndpointHost.Width = UiTheme.Scale(370);
-        fullEndpointHost.MinimumSize = new Size(UiTheme.Scale(370), 0);
+        fullEndpointHost.Width = 370;
+        fullEndpointHost.MinimumSize = new Size(370, 0);
         fullEndpointHost.Anchor = AnchorStyles.Left | AnchorStyles.Right;
-        fullEndpointHost.Margin = UiTheme.Pad(0, 0, 0, 12);
+        fullEndpointHost.Margin = new Padding(0, 0, 0, 12);
         fullEndpointHost.InnerBox.TextChanged += delegate
         {
             if (suppressChangeTracking || string.IsNullOrWhiteSpace(fullEndpointHost.TextValue)) return;
@@ -89,7 +88,7 @@ internal sealed class ManualConnectDialog : Form
         };
         layout.Controls.Add(fullEndpointHost, 1, 1);
 
-        Label quickLabel = MakeInlineLabel("快捷输入", UiTheme.Pad(0, 0, 12, 12));
+        Label quickLabel = MakeInlineLabel("快捷输入", new Padding(0, 0, 12, 12));
         layout.Controls.Add(quickLabel, 0, 2);
 
         FlowLayoutPanel quickRow = new BufferedFlowLayoutPanel();
@@ -98,15 +97,15 @@ internal sealed class ManualConnectDialog : Form
         quickRow.WrapContents = false;
         quickRow.BackColor = UiTheme.PageBg;
         quickRow.Anchor = AnchorStyles.Left;
-        quickRow.Margin = UiTheme.Pad(0, 0, 0, 12);
+        quickRow.Margin = new Padding(0, 0, 0, 12);
 
-        Label fixedPrefix = MakeInlineLabel("192.168.", UiTheme.Pad(0, 0, 4, 0));
+        Label fixedPrefix = MakeInlineLabel("192.168.", new Padding(0, 0, 4, 0));
         fixedPrefix.Font = UiTheme.BodyBoldFont;
 
         subnetHost = MakeCompactInput(58, 3, "");
-        Label dotLabel = MakeInlineLabel(".", UiTheme.Pad(5, 0, 5, 0));
+        Label dotLabel = MakeInlineLabel(".", new Padding(5, 0, 5, 0));
         hostOctetHost = MakeCompactInput(58, 3, "");
-        Label colonLabel = MakeInlineLabel(":", UiTheme.Pad(5, 0, 5, 0));
+        Label colonLabel = MakeInlineLabel(":", new Padding(5, 0, 5, 0));
 
         suppressChangeTracking = true;
         portHost = MakeCompactInput(78, 5, "5555");
@@ -130,10 +129,10 @@ internal sealed class ManualConnectDialog : Form
 
         statusLabel = new Label();
         statusLabel.AutoSize = true;
-        statusLabel.MaximumSize = new Size(UiTheme.Scale(460), 0);
+        statusLabel.MaximumSize = new Size(460, 0);
         statusLabel.Font = UiTheme.SubFont;
         statusLabel.ForeColor = UiTheme.TextSecondary;
-        statusLabel.Margin = UiTheme.Pad(0, 2, 0, 14);
+        statusLabel.Margin = new Padding(0, 2, 0, 14);
         layout.Controls.Add(statusLabel, 0, 3);
         layout.SetColumnSpan(statusLabel, 2);
 
@@ -149,9 +148,10 @@ internal sealed class ManualConnectDialog : Form
         fullEndpointHost.BorderLineColor = UiTheme.AccentBlue;
         ActiveControl = fullEndpointHost.InnerBox;
 
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
         ResumeLayout(false);
         PerformLayout();
-        ClientSize = layout.GetPreferredSize(Size.Empty);
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -167,6 +167,12 @@ internal sealed class ManualConnectDialog : Form
         PerformLayout();
         ResumeLayout(false);
         UiTheme.CenterOnOwner(this);
+    }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        PerformLayout();
     }
 
     protected override void OnShown(EventArgs e)
@@ -189,10 +195,9 @@ internal sealed class ManualConnectDialog : Form
     static ModernTextBoxHost MakeCompactInput(int widthDp, int maxLength, string initialValue)
     {
         ModernTextBoxHost box = new ModernTextBoxHost("");
-        int scaledW = UiTheme.Scale(widthDp);
-        box.Width = scaledW;
-        box.MinimumSize = new Size(scaledW, 0);
-        box.Padding = UiTheme.Pad(6, 7, 6, 7);
+        box.Width = widthDp;
+        box.MinimumSize = new Size(widthDp, 0);
+        box.Padding = new Padding(6, 7, 6, 7);
         box.Margin = new Padding(0);
         box.InnerBox.MaxLength = maxLength;
         box.InnerBox.TextAlign = HorizontalAlignment.Center;

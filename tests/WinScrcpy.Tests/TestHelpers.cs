@@ -21,6 +21,7 @@ internal static class StaRunner
         lock (WinFormsInitLock)
         {
             if (winFormsInitialized) return;
+            try { Application.SetHighDpiMode(HighDpiMode.PerMonitorV2); } catch (Exception) { }
             try { Application.EnableVisualStyles(); } catch (Exception) { }
             try { Application.SetCompatibleTextRenderingDefault(false); } catch (InvalidOperationException) { }
             winFormsInitialized = true;

@@ -57,7 +57,6 @@ internal sealed class PairDialog : Form
         StartPosition = FormStartPosition.CenterParent;
         MaximizeBox = false;
         MinimizeBox = false;
-        AutoScaleMode = AutoScaleMode.None;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
         BackColor = UiTheme.PageBg;
@@ -81,7 +80,7 @@ internal sealed class PairDialog : Form
         rootLayout.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         rootLayout.ColumnCount = 1;
         rootLayout.RowCount = 2;
-        rootLayout.Padding = UiTheme.Pad(20, 18, 20, 18);
+        rootLayout.Padding = new Padding(20, 18, 20, 18);
         rootLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
         // Apple 风格分段切换条：扫码配对 | 配对码配对
@@ -90,23 +89,23 @@ internal sealed class PairDialog : Form
         segmentHost.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         segmentHost.CardBg = Color.FromArgb(233, 233, 238);
         segmentHost.BorderLineColor = Color.FromArgb(222, 222, 228);
-        segmentHost.CornerRadius = UiTheme.Scale(8);
+        segmentHost.CornerRadiusDp = 8;
         segmentHost.ColumnCount = 2;
         segmentHost.RowCount = 1;
-        segmentHost.Padding = UiTheme.Pad(3, 3, 3, 3);
-        segmentHost.Margin = UiTheme.Pad(0, 0, 0, 14);
-        segmentHost.MinimumSize = new Size(UiTheme.Scale(460), 0);
+        segmentHost.Padding = new Padding(3, 3, 3, 3);
+        segmentHost.Margin = new Padding(0, 0, 0, 14);
+        segmentHost.MinimumSize = new Size(460, 0);
         segmentHost.Anchor = AnchorStyles.Left | AnchorStyles.Right;
         segmentHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
         segmentHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
         segmentHost.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         tabQrBtn = new SegmentTabButton("扫码配对");
-        tabQrBtn.Margin = UiTheme.Pad(0, 0, 2, 0);
+        tabQrBtn.Margin = new Padding(0, 0, 2, 0);
         tabQrBtn.Click += delegate { SwitchMode(true); };
 
         tabCodeBtn = new SegmentTabButton("配对码配对");
-        tabCodeBtn.Margin = UiTheme.Pad(2, 0, 0, 0);
+        tabCodeBtn.Margin = new Padding(2, 0, 0, 0);
         tabCodeBtn.Click += delegate { SwitchMode(false); };
 
         segmentHost.Controls.Add(tabQrBtn, 0, 0);
@@ -124,10 +123,10 @@ internal sealed class PairDialog : Form
 
         Label qrTipLabel = new Label();
         qrTipLabel.AutoSize = true;
-        qrTipLabel.MaximumSize = new Size(UiTheme.Scale(460), 0);
+        qrTipLabel.MaximumSize = new Size(460, 0);
         qrTipLabel.Font = UiTheme.SubFont;
         qrTipLabel.ForeColor = UiTheme.TextSecondary;
-        qrTipLabel.Margin = UiTheme.Pad(0, 0, 0, 14);
+        qrTipLabel.Margin = new Padding(0, 0, 0, 14);
         qrTipLabel.Text = "在手机「开发者选项 -> 无线调试 -> 使用二维码配对设备」扫描下方二维码：";
         qrPanel.Controls.Add(qrTipLabel, 0, 0);
 
@@ -136,11 +135,11 @@ internal sealed class PairDialog : Form
         qrCard.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         qrCard.CardBg = Color.White;
         qrCard.BorderLineColor = UiTheme.BorderColor;
-        qrCard.CornerRadius = UiTheme.Scale(12);
+        qrCard.CornerRadiusDp = 12;
         qrCard.ColumnCount = 1;
         qrCard.RowCount = 1;
-        qrCard.Padding = UiTheme.Pad(10, 10, 10, 10);
-        qrCard.Margin = UiTheme.Pad(0, 0, 0, 12);
+        qrCard.Padding = new Padding(10, 10, 10, 10);
+        qrCard.Margin = new Padding(0, 0, 0, 12);
         qrCard.Anchor = AnchorStyles.None;
 
         qrPictureBox = new PictureBox();
@@ -162,11 +161,11 @@ internal sealed class PairDialog : Form
 
         qrStatusLabel = new Label();
         qrStatusLabel.AutoSize = true;
-        qrStatusLabel.MaximumSize = new Size(UiTheme.Scale(330), 0);
+        qrStatusLabel.MaximumSize = new Size(330, 0);
         qrStatusLabel.Anchor = AnchorStyles.Left;
         qrStatusLabel.Font = UiTheme.SubFont;
         qrStatusLabel.ForeColor = UiTheme.TextSecondary;
-        qrStatusLabel.Margin = UiTheme.Pad(0, 4, 12, 0);
+        qrStatusLabel.Margin = new Padding(0, 4, 12, 0);
         qrStatusLabel.Text = "等待手机扫码，检测到服务将自动完成配对…";
         qrFooter.Controls.Add(qrStatusLabel, 0, 0);
 
@@ -190,10 +189,10 @@ internal sealed class PairDialog : Form
 
         codeTipLabel = new Label();
         codeTipLabel.AutoSize = true;
-        codeTipLabel.MaximumSize = new Size(UiTheme.Scale(460), 0);
+        codeTipLabel.MaximumSize = new Size(460, 0);
         codeTipLabel.Font = UiTheme.SubFont;
         codeTipLabel.ForeColor = UiTheme.TextSecondary;
-        codeTipLabel.Margin = UiTheme.Pad(0, 0, 0, 20);
+        codeTipLabel.Margin = new Padding(0, 0, 0, 20);
         codeTipLabel.Text = "在手机「开发者选项 -> 无线调试 -> 使用配对码配对设备」查看地址与配对码：";
         codePanel.Controls.Add(codeTipLabel, 0, 0);
         codePanel.SetColumnSpan(codeTipLabel, 2);
@@ -202,15 +201,15 @@ internal sealed class PairDialog : Form
         epLabel.AutoSize = true;
         epLabel.Anchor = AnchorStyles.Left;
         epLabel.ForeColor = UiTheme.TextPrimary;
-        epLabel.Margin = UiTheme.Pad(0, 0, 16, 14);
+        epLabel.Margin = new Padding(0, 0, 16, 14);
         epLabel.Text = "IP:Port";
         codePanel.Controls.Add(epLabel, 0, 1);
 
         endpointHost = new ModernTextBoxHost("例如 192.168.1.5:37891");
-        endpointHost.Width = UiTheme.Scale(370);
-        endpointHost.MinimumSize = new Size(UiTheme.Scale(370), 0);
+        endpointHost.Width = 370;
+        endpointHost.MinimumSize = new Size(370, 0);
         endpointHost.Anchor = AnchorStyles.Left | AnchorStyles.Right;
-        endpointHost.Margin = UiTheme.Pad(0, 0, 0, 14);
+        endpointHost.Margin = new Padding(0, 0, 0, 14);
         if (!string.IsNullOrEmpty(discoveredPairingEndpoint))
         {
             endpointHost.TextValue = discoveredPairingEndpoint;
@@ -221,23 +220,23 @@ internal sealed class PairDialog : Form
         codeLabel.AutoSize = true;
         codeLabel.Anchor = AnchorStyles.Left;
         codeLabel.ForeColor = UiTheme.TextPrimary;
-        codeLabel.Margin = UiTheme.Pad(0, 0, 16, 14);
+        codeLabel.Margin = new Padding(0, 0, 16, 14);
         codeLabel.Text = "配对码";
         codePanel.Controls.Add(codeLabel, 0, 2);
 
         codeHost = new ModernTextBoxHost("6 位数字配对码");
-        codeHost.Width = UiTheme.Scale(240);
-        codeHost.MinimumSize = new Size(UiTheme.Scale(240), 0);
+        codeHost.Width = 240;
+        codeHost.MinimumSize = new Size(240, 0);
         codeHost.InnerBox.MaxLength = 12;
-        codeHost.Margin = UiTheme.Pad(0, 0, 0, 14);
+        codeHost.Margin = new Padding(0, 0, 0, 14);
         codePanel.Controls.Add(codeHost, 1, 2);
 
         codeStatusLabel = new Label();
         codeStatusLabel.AutoSize = true;
-        codeStatusLabel.MaximumSize = new Size(UiTheme.Scale(460), 0);
+        codeStatusLabel.MaximumSize = new Size(460, 0);
         codeStatusLabel.Font = UiTheme.SubFont;
         codeStatusLabel.ForeColor = UiTheme.TextDanger;
-        codeStatusLabel.Margin = UiTheme.Pad(0, 2, 0, 14);
+        codeStatusLabel.Margin = new Padding(0, 2, 0, 14);
         codePanel.Controls.Add(codeStatusLabel, 0, 3);
         codePanel.SetColumnSpan(codeStatusLabel, 2);
 
@@ -251,17 +250,10 @@ internal sealed class PairDialog : Form
         RegenerateQrCode();
 
         // 将两个面板放进固定尺寸的共享容器内，切换页签时不再缩放顶层窗口，避免闪烁跳动。
-        Size qrPref = qrPanel.GetPreferredSize(Size.Empty);
-        Size codePref = codePanel.GetPreferredSize(Size.Empty);
-        int hostW = Math.Max(UiTheme.Scale(460), Math.Max(qrPref.Width, codePref.Width));
-        int hostH = Math.Max(qrPref.Height, codePref.Height) + UiTheme.Scale(14);
-
         qrPanel.Dock = DockStyle.Top;
         codePanel.Visible = false;
 
         contentHost = new BufferedPanel();
-        contentHost.Size = new Size(hostW, hostH);
-        contentHost.MinimumSize = new Size(hostW, hostH);
         contentHost.BackColor = UiTheme.PageBg;
         contentHost.Margin = new Padding(0);
         contentHost.Controls.Add(qrPanel);
@@ -277,7 +269,11 @@ internal sealed class PairDialog : Form
         pollTimer.Tick += OnPollTimerTick;
 
         SwitchMode(true);
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
         ResumeLayout(false);
+        RenderQrBitmapForDpi();
+        UpdateContentHostSize();
         PerformLayout();
         CenterCodePanel();
         ClientSize = rootLayout.GetPreferredSize(Size.Empty);
@@ -340,10 +336,39 @@ internal sealed class PairDialog : Form
     {
         base.OnLoad(e);
         SuspendLayout();
+        RenderQrBitmapForDpi();
+        UpdateContentHostSize();
         PerformLayout();
         CenterCodePanel();
         ResumeLayout(false);
+        ClientSize = rootLayout.GetPreferredSize(Size.Empty);
         UiTheme.CenterOnOwner(this);
+    }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        SuspendLayout();
+        RenderQrBitmapForDpi();
+        UpdateContentHostSize();
+        PerformLayout();
+        CenterCodePanel();
+        ResumeLayout(false);
+        ClientSize = rootLayout.GetPreferredSize(Size.Empty);
+    }
+
+    void UpdateContentHostSize()
+    {
+        if (contentHost == null || qrPanel == null || codePanel == null) return;
+        Size qrPref = qrPanel.GetPreferredSize(Size.Empty);
+        Size codePref = codePanel.GetPreferredSize(Size.Empty);
+        int hostW = Math.Max(LogicalToDeviceUnits(460), Math.Max(qrPref.Width, codePref.Width));
+        int hostH = Math.Max(qrPref.Height, codePref.Height) + LogicalToDeviceUnits(14);
+        contentHost.MinimumSize = Size.Empty;
+        contentHost.MaximumSize = Size.Empty;
+        contentHost.Size = new Size(hostW, hostH);
+        contentHost.MinimumSize = new Size(hostW, hostH);
+        contentHost.MaximumSize = new Size(hostW, hostH);
     }
 
     protected override void OnShown(EventArgs e)
@@ -409,8 +434,8 @@ internal sealed class PairDialog : Form
 
             int segGap = (segmentHost != null && segmentHost.Height > 0 && contentHost.Top > 0)
                 ? Math.Max(0, contentHost.Top - segmentHost.Bottom)
-                : (segmentHost != null ? segmentHost.Margin.Bottom : UiTheme.Scale(14));
-            int outerBottom = rootLayout != null ? rootLayout.Padding.Bottom : UiTheme.Scale(18);
+                : (segmentHost != null ? segmentHost.Margin.Bottom : LogicalToDeviceUnits(14));
+            int outerBottom = rootLayout != null ? rootLayout.Padding.Bottom : LogicalToDeviceUnits(18);
 
             int curTipBottom = codeTipLabel.Margin.Bottom;
             Size curPref = codePanel.GetPreferredSize(Size.Empty);
@@ -419,7 +444,7 @@ internal sealed class PairDialog : Form
 
             // 使「Tab -> 说明文字」「说明文字 -> 输入框」「按钮 -> 底部边距」三段垂直留白保持均衡。
             int g = (segGap + freeY + outerBottom) / 3;
-            int minTip = UiTheme.Scale(14);
+            int minTip = LogicalToDeviceUnits(14);
             int tipBottom = Math.Max(minTip, g);
             int maxEqualTip = (freeY + segGap) / 2;
             if (tipBottom > maxEqualTip)
@@ -429,7 +454,7 @@ internal sealed class PairDialog : Form
             int topInHost = Math.Max(0, tipBottom - segGap);
             if (topInHost + tipBottom > freeY)
             {
-                tipBottom = Math.Max(UiTheme.Scale(8), Math.Min(tipBottom, freeY));
+                tipBottom = Math.Max(LogicalToDeviceUnits(8), Math.Min(tipBottom, freeY));
                 topInHost = Math.Max(0, freeY - tipBottom);
             }
 
@@ -479,16 +504,22 @@ internal sealed class PairDialog : Form
         if (isPairing) return;
         qrServiceName = "winscrcpy-" + GenerateRandomToken(8);
         qrPassword = GenerateRandomToken(10);
+        RenderQrBitmapForDpi();
+        qrStatusLabel.ForeColor = UiTheme.TextSecondary;
+        qrStatusLabel.Text = "等待手机扫码，检测到服务将自动完成配对…";
+    }
+
+    void RenderQrBitmapForDpi()
+    {
+        if (string.IsNullOrEmpty(qrServiceName) || string.IsNullOrEmpty(qrPassword)) return;
         string payload = "WIFI:T:ADB;S:" + qrServiceName + ";P:" + qrPassword + ";;";
 
         bool[,] matrix = QrEncoder.Encode(payload);
-        int modulePx = Math.Max(4, UiTheme.Scale(4));
+        int modulePx = Math.Max(4, LogicalToDeviceUnits(4));
         Bitmap bmp = QrEncoder.RenderBitmap(matrix, modulePx, 3);
 
         DisposeQrImage();
         qrPictureBox.Image = bmp;
-        qrStatusLabel.ForeColor = UiTheme.TextSecondary;
-        qrStatusLabel.Text = "等待手机扫码，检测到服务将自动完成配对…";
     }
 
     void DisposeQrImage()
@@ -679,18 +710,47 @@ internal sealed class PairDialog : Form
     sealed class SegmentTabButton : Button
     {
         bool isActive;
+        Font boldFont;
+        Font inactiveFont;
 
         public SegmentTabButton(string text)
         {
             Text = text;
             AutoSize = false;
-            Height = UiTheme.Scale(36);
+            Height = 36;
             Dock = DockStyle.Fill;
             FlatStyle = FlatStyle.Flat;
             FlatAppearance.BorderSize = 0;
             Cursor = Cursors.Hand;
             UseVisualStyleBackColor = false;
+            RebuildFonts();
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        }
+
+        void RebuildFonts()
+        {
+            if (boldFont != null) { boldFont.Dispose(); boldFont = null; }
+            if (inactiveFont != null) { inactiveFont.Dispose(); inactiveFont = null; }
+            Font baseFont = Font ?? UiTheme.BodyFont;
+            boldFont = new Font(baseFont.FontFamily, baseFont.Size, FontStyle.Bold);
+            float inactivePt = Math.Max(9f, baseFont.Size - 0.5f);
+            inactiveFont = new Font(baseFont.FontFamily, inactivePt, FontStyle.Regular);
+        }
+
+        protected override void OnFontChanged(EventArgs e)
+        {
+            base.OnFontChanged(e);
+            RebuildFonts();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (boldFont != null) { boldFont.Dispose(); boldFont = null; }
+                if (inactiveFont != null) { inactiveFont.Dispose(); inactiveFont = null; }
+            }
+            base.Dispose(disposing);
         }
 
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -729,7 +789,7 @@ internal sealed class PairDialog : Form
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             e.Graphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
-            float radius = UiTheme.Scale(6);
+            float radius = LogicalToDeviceUnits(6);
             if (isActive)
             {
                 Color activeBg = Enabled ? Color.White : Color.FromArgb(245, 245, 247);
@@ -755,7 +815,7 @@ internal sealed class PairDialog : Form
                 }
             }
 
-            Font drawFont = isActive ? UiTheme.BodyBoldFont : UiTheme.SubFont;
+            Font drawFont = isActive ? (boldFont ?? Font) : (inactiveFont ?? Font);
             Color drawColor = !Enabled ? UiTheme.TextDisabled : (isActive ? UiTheme.TextPrimary : UiTheme.TextSecondary);
             TextRenderer.DrawText(
                 e.Graphics,
