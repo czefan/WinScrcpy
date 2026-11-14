@@ -282,7 +282,15 @@ internal sealed class ManualConnectDialog : Form
         ThreadPool.QueueUserWorkItem(delegate
         {
             string msg;
-            bool ok = runner.ConnectEndpoint(ep, out msg);
+            bool ok = false;
+            try
+            {
+                ok = runner.ConnectEndpoint(ep, out msg);
+            }
+            catch (Exception ex)
+            {
+                msg = "连接过程发生异常: " + ex.Message;
+            }
             if (IsDisposed || Disposing || !IsHandleCreated) return;
             try
             {

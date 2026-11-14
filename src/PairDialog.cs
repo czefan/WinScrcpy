@@ -532,7 +532,15 @@ internal sealed class PairDialog : Form
         ThreadPool.QueueUserWorkItem(delegate
         {
             string msg;
-            bool ok = runner.PairEndpoint(endpoint, password, out msg);
+            bool ok = false;
+            try
+            {
+                ok = runner.PairEndpoint(endpoint, password, out msg);
+            }
+            catch (Exception ex)
+            {
+                msg = "配对过程发生异常: " + ex.Message;
+            }
             if (IsDisposed || Disposing || !IsHandleCreated) return;
 
             try
@@ -583,7 +591,15 @@ internal sealed class PairDialog : Form
         ThreadPool.QueueUserWorkItem(delegate
         {
             string msg;
-            bool ok = runner.PairEndpoint(ep, code, out msg);
+            bool ok = false;
+            try
+            {
+                ok = runner.PairEndpoint(ep, code, out msg);
+            }
+            catch (Exception ex)
+            {
+                msg = "配对过程发生异常: " + ex.Message;
+            }
             if (IsDisposed || Disposing || !IsHandleCreated) return;
             try
             {

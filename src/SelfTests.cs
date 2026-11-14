@@ -1,7 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 
 internal static class SelfTests
@@ -26,7 +29,13 @@ internal static class SelfTests
             TestQuoteArg();
             TestTerminalCommands();
             TestQrEncoderAndPairingMatch();
+            TestToolPathResolution();
+            TestProcessRunner();
+            TestProcessRunnerPipeHeldByChild();
+            TestProcessRunnerReadErrors();
+            TestScrcpyEnvironmentAndInvalidConfig();
             TestUiLayoutNoClipping();
+            TestMainFormBusyRecovery();
             Console.WriteLine("SELFTEST PASS");
             return 0;
         }
@@ -819,5 +828,405 @@ internal static class SelfTests
             if (typed != null) list.Add(typed);
             if (c.Controls.Count > 0) CollectControls(c, list);
         }
+    }
+
+    static void TestToolPathResolution()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "WinScrcpy 测试路径 " + Guid.NewGuid().ToString("N"));
+        string appDir = Path.Combine(root, "应用 目录");
+        string explicitDir = Path.Combine(root, "指定 工具");
+        string pathDir = Path.Combine(root, "环境变量 目录");
+        Directory.CreateDirectory(appDir);
+        Directory.CreateDirectory(explicitDir);
+        Directory.CreateDirectory(pathDir);
+
+        try
+        {
+            string appAdb = Path.Combine(appDir, "adb.exe");
+            string explicitScrcpy = Path.Combine(explicitDir, "my scrcpy.exe");
+            string pathAdb = Path.Combine(pathDir, "adb.exe");
+            string pathScrcpy = Path.Combine(pathDir, "scrcpy.exe");
+            File.WriteAllText(appAdb, "");
+            File.WriteAllText(explicitScrcpy, "");
+            File.WriteAllText(pathAdb, "");
+            File.WriteAllText(pathScrcpy, "");
+
+            string fakePath = "\"" + pathDir + "\";C:\\不存在_WinScrcpy_Test";
+
+            // 1. 显式配置有效路径 -> 返回完整绝对路径
+            ToolResolutionResult r1 = ToolPathResolver.ResolveTool(explicitScrcpy, "scrcpy", appDir, fakePath);
+            Assert(r1.Success && string.Equals(r1.ResolvedPath, Path.GetFullPath(explicitScrcpy), StringComparison.OrdinalIgnoreCase),
+                "explicit valid path with spaces & Chinese should resolve");
+
+            // 2. 显式配置无效路径 -> 必须报错，不能静默回退到 appDir 或 PATH
+            string missingExplicit = Path.Combine(explicitDir, "missing-adb.exe");
+            ToolResolutionResult r2 = ToolPathResolver.ResolveTool(missingExplicit, "adb", appDir, fakePath);
+            Assert(!r2.Success && string.IsNullOrEmpty(r2.ResolvedPath) && r2.Error.Contains("missing-adb.exe"),
+                "explicit missing path must fail without falling back");
+
+            // 3. 默认名称 -> appDir 优先于 PATH
+            ToolResolutionResult r3 = ToolPathResolver.ResolveTool("adb", "adb", appDir, fakePath);
+            Assert(r3.Success && string.Equals(r3.ResolvedPath, Path.GetFullPath(appAdb), StringComparison.OrdinalIgnoreCase),
+                "appDir should take precedence over PATH");
+
+            // 4. appDir 不存在目标时 -> 从 PATH（含带引号和中文空格路径）解析
+            ToolResolutionResult r4 = ToolPathResolver.ResolveTool("", "scrcpy", appDir, fakePath);
+            Assert(r4.Success && string.Equals(r4.ResolvedPath, Path.GetFullPath(pathScrcpy), StringComparison.OrdinalIgnoreCase),
+                "PATH lookup should handle quoted dir with spaces and Chinese");
+
+            // 5. 全部路径缺失 -> 返回失败
+            ToolResolutionResult r5 = ToolPathResolver.ResolveTool("", "nonexistent-tool-xyz", appDir, fakePath);
+            Assert(!r5.Success && !string.IsNullOrEmpty(r5.Error), "missing default tool should return error");
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); }
+            catch (Exception) { }
+        }
+    }
+
+    static void TestProcessRunner()
+    {
+        string psExe = ToolPathResolver.FindExecutableInPath("powershell");
+        Assert(!string.IsNullOrEmpty(psExe), "powershell.exe should exist in PATH for self tests");
+
+        string root = Path.Combine(Path.GetTempPath(), "WinScrcpy 进程测试 " + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        string scriptPath = Path.Combine(root, "参数 与 状态.ps1");
+        File.WriteAllText(scriptPath,
+            "param([string]$mode)\r\n" +
+            "$rest = @($args)\r\n" +
+            "if ($mode -eq 'echo') {\r\n" +
+            "  [Console]::Out.WriteLine('COUNT=' + $rest.Count)\r\n" +
+            "  for ($i = 0; $i -lt $rest.Count; $i++) { [Console]::Out.WriteLine('ARG=' + $rest[$i]) }\r\n" +
+            "  [Console]::Error.WriteLine('STDERR_中文')\r\n" +
+            "  exit 0\r\n" +
+            "}\r\n" +
+            "if ($mode -eq 'fail') {\r\n" +
+            "  [Console]::Error.WriteLine('boom_error')\r\n" +
+            "  exit 42\r\n" +
+            "}\r\n" +
+            "if ($mode -eq 'binary') {\r\n" +
+            "  $bytes = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF)\r\n" +
+            "  $stream = [Console]::OpenStandardOutput()\r\n" +
+            "  $stream.Write($bytes, 0, $bytes.Length)\r\n" +
+            "  $stream.Flush()\r\n" +
+            "  exit 0\r\n" +
+            "}\r\n" +
+            "if ($mode -eq 'sleep') {\r\n" +
+            "  Start-Sleep -Seconds 30\r\n" +
+            "  exit 0\r\n" +
+            "}\r\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            // 1. 空格、中文、脚本路径均通过 ArgumentList 精确传递
+            CommandOutput echoOut = ProcessRunner.RunText(
+                psExe,
+                new string[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "echo", "hello world", "中文 参数" },
+                10000);
+            Assert(echoOut.Success && echoOut.ExitCode == 0, "echo process should succeed: " + echoOut.GetFailureSummary("failed"));
+            Assert(echoOut.StdOut.Contains("COUNT=2") && echoOut.StdOut.Contains("ARG=hello world") && echoOut.StdOut.Contains("ARG=中文 参数"),
+                "ArgumentList should preserve spaces and Chinese: " + echoOut.StdOut);
+            Assert(echoOut.StdErr.Contains("STDERR_中文"), "StdErr should preserve UTF-8 Chinese text");
+
+            // 2. 非零退出码
+            CommandOutput failOut = ProcessRunner.RunText(
+                psExe,
+                new string[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "fail" },
+                10000);
+            Assert(!failOut.Success && !failOut.TimedOut && !failOut.Cancelled && failOut.ExitCode == 42,
+                "non-zero exit code should be preserved");
+            Assert(failOut.StdErr.Contains("boom_error"), "stderr should be captured on non-zero exit");
+
+            // 3. 二进制 stdout
+            CommandOutput binOut = ProcessRunner.RunBinary(
+                psExe,
+                new string[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "binary" },
+                10000);
+            Assert(binOut.Success && binOut.StdOutBytes != null && binOut.StdOutBytes.Length == 6 &&
+                   binOut.StdOutBytes[0] == 0x89 && binOut.StdOutBytes[4] == 0x00 && binOut.StdOutBytes[5] == 0xFF,
+                "binary stdout should capture exact bytes including NUL and 0xFF");
+
+            // 4. 超时终止
+            Stopwatch swTimeout = Stopwatch.StartNew();
+            CommandOutput timeoutOut = ProcessRunner.RunText(
+                psExe,
+                new string[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "sleep" },
+                250);
+            swTimeout.Stop();
+            Assert(!timeoutOut.Success && timeoutOut.TimedOut && !timeoutOut.Cancelled && swTimeout.ElapsedMilliseconds < 5000,
+                "timeout should terminate child promptly");
+
+            // 5. 外部取消
+            using (CancellationTokenSource cts = new CancellationTokenSource(200))
+            {
+                Stopwatch swCancel = Stopwatch.StartNew();
+                CommandOutput cancelOut = ProcessRunner.RunText(
+                    psExe,
+                    new string[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "sleep" },
+                    15000,
+                    null,
+                    null,
+                    cts.Token);
+                swCancel.Stop();
+                Assert(!cancelOut.Success && cancelOut.Cancelled && !cancelOut.TimedOut && swCancel.ElapsedMilliseconds < 5000,
+                    "cancellation should terminate child promptly");
+            }
+
+            // 6. 缺失可执行文件
+            string missingExe = Path.Combine(root, "不存在的工具.exe");
+            CommandOutput missingOut = ProcessRunner.RunText(missingExe, new string[] { "--version" }, 2000);
+            Assert(!missingOut.Success && !string.IsNullOrEmpty(missingOut.LaunchError),
+                "missing executable should populate LaunchError");
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); }
+            catch (Exception) { }
+        }
+    }
+
+    static void TestScrcpyEnvironmentAndInvalidConfig()
+    {
+        ProcessStartInfo psi = DeviceRunner.BuildScrcpyStartInfo(
+            "C:\\工具 空格\\scrcpy.exe",
+            "D:\\安卓 工具\\adb.exe",
+            "192.168.1.5:5555",
+            "我的手机 [无线]",
+            new List<string> { "--max-size", "1280" });
+        Assert(psi.FileName == "C:\\工具 空格\\scrcpy.exe", "scrcpy FileName mismatch");
+        Assert(!psi.UseShellExecute, "UseShellExecute must be false to inject ADB env var");
+        Assert(psi.Environment["ADB"] == "D:\\安卓 工具\\adb.exe", "ADB env var must point to resolved adb.exe");
+        Assert(psi.Environment["ADB_MDNS_AUTO_CONNECT"] == "0", "ADB_MDNS_AUTO_CONNECT must be 0");
+        Assert(psi.ArgumentList.Count == 5 &&
+               psi.ArgumentList[0] == "-s" &&
+               psi.ArgumentList[1] == "192.168.1.5:5555" &&
+               psi.ArgumentList[2] == "--window-title=我的手机 [无线]" &&
+               psi.ArgumentList[3] == "--max-size" &&
+               psi.ArgumentList[4] == "1280",
+            "scrcpy ArgumentList mismatch");
+
+        AppConfig invalidCfg = new AppConfig();
+        invalidCfg.adbPath = "C:\\不存在_WinScrcpy\\adb.exe";
+        invalidCfg.scrcpyPath = "C:\\不存在_WinScrcpy\\scrcpy.exe";
+        DeviceRunner runner = new DeviceRunner(invalidCfg);
+
+        CommandOutput adbOut = runner.RunAdb(new string[] { "version" }, 2000);
+        Assert(!adbOut.Success && adbOut.LaunchError.Contains("adb") && adbOut.LaunchError.Contains("不存在"),
+            "invalid explicit adbPath must fail clearly: " + adbOut.LaunchError);
+
+        string err;
+        Assert(!runner.LaunchScrcpy("serial1", "测试设备", new List<string>(), out err) && err.Contains("scrcpy") && err.Contains("不存在"),
+            "invalid explicit scrcpyPath must fail clearly: " + err);
+
+        string launchedWith;
+        Assert(!runner.OpenDeviceTerminal("serial1", "测试设备", TerminalMode.LocalAdbEnv, out launchedWith, out err) && err.Contains("adb") && err.Contains("不存在"),
+            "terminal launcher must reject invalid explicit adbPath: " + err);
+    }
+
+    static void TestMainFormBusyRecovery()
+    {
+        string tempCfg = Path.Combine(Path.GetTempPath(), "WinScrcpy-ui-test-" + Guid.NewGuid().ToString("N") + ".json");
+        ConfigManager manager = new ConfigManager(tempCfg);
+        using (MainForm form = new MainForm(manager, new AppConfig(), null, false))
+        {
+            IntPtr handle = form.Handle;
+            Assert(handle != IntPtr.Zero, "MainForm handle should be created");
+
+            form.RunBusyActionForTest("模拟异常任务", delegate
+            {
+                throw new InvalidOperationException("模拟后台异常");
+            }, "测试操作失败");
+            Assert(form.IsBusyState, "MainForm should enter busy state immediately");
+
+            Stopwatch sw = Stopwatch.StartNew();
+            while (form.IsBusyState && sw.ElapsedMilliseconds < 3000)
+            {
+                Application.DoEvents();
+                Thread.Sleep(15);
+            }
+
+            Assert(!form.IsBusyState, "MainForm must recover from busy state when async work throws");
+        }
+    }
+
+    static void KillProcessByPidFile(string pidFile)
+    {
+        if (!File.Exists(pidFile)) return;
+        try
+        {
+            string raw = File.ReadAllText(pidFile).Trim();
+            int pid;
+            if (int.TryParse(raw, out pid) && pid > 0)
+            {
+                using (Process child = Process.GetProcessById(pid))
+                {
+                    if (!child.HasExited)
+                    {
+                        child.Kill();
+                        child.WaitForExit(1000);
+                    }
+                }
+            }
+        }
+        catch (Exception) { }
+    }
+
+    static void TestProcessRunnerPipeHeldByChild()
+    {
+        string psExe = ToolPathResolver.FindExecutableInPath("powershell.exe");
+        Assert(!string.IsNullOrEmpty(psExe), "powershell.exe should exist in PATH");
+
+        string root = Path.Combine(Path.GetTempPath(), "WinScrcpy 管道测试 " + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        string scriptPath = Path.Combine(root, "hold_pipe.ps1");
+        string pidTextFile = Path.Combine(root, "pid_text.txt");
+        string pidBinFile = Path.Combine(root, "pid_bin.txt");
+
+        File.WriteAllText(scriptPath,
+            "param([string]$mode, [string]$pidFile)\r\n" +
+            "if ($mode -eq 'text') {\r\n" +
+            "  [Console]::Out.Write('NO_NEWLINE_中文输出')\r\n" +
+            "  [Console]::Out.Flush()\r\n" +
+            "}\r\n" +
+            "elseif ($mode -eq 'binary') {\r\n" +
+            "  $bytes = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF)\r\n" +
+            "  $s = [Console]::OpenStandardOutput()\r\n" +
+            "  $s.Write($bytes, 0, $bytes.Length)\r\n" +
+            "  $s.Flush()\r\n" +
+            "}\r\n" +
+            "$psi = [System.Diagnostics.ProcessStartInfo]::new($PSHOME + '\\powershell.exe', '-NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 30\"')\r\n" +
+            "$psi.UseShellExecute = $false\r\n" +
+            "$psi.CreateNoWindow = $true\r\n" +
+            "$child = [System.Diagnostics.Process]::Start($psi)\r\n" +
+            "[System.IO.File]::WriteAllText($pidFile, $child.Id.ToString())\r\n" +
+            "exit 0\r\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            // 1. 文本模式：父进程写出无换行文本并退出，子进程继续持有管道
+            Stopwatch swText = Stopwatch.StartNew();
+            CommandOutput textOut = ProcessRunner.RunText(
+                psExe,
+                new string[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "text", pidTextFile },
+                10000,
+                null,
+                null,
+                CancellationToken.None,
+                300);
+            swText.Stop();
+            KillProcessByPidFile(pidTextFile);
+
+            Assert(swText.ElapsedMilliseconds < 5000, "text drain timeout should prevent hanging on child pipe");
+            Assert(textOut.ExitCode == 0 && !textOut.TimedOut && !textOut.Cancelled,
+                "parent exit should preserve ExitCode=0 without process timeout");
+            Assert(textOut.OutputTimedOut && !textOut.Success && textOut.HasExecutionFailure,
+                "incomplete pipe drain must set OutputTimedOut and fail Success");
+            Assert(textOut.GetFailureSummary("fail").Contains("超时"),
+                "failure summary should explain incomplete output drain");
+            Assert(textOut.StdOut.Contains("NO_NEWLINE_中文输出"),
+                "unterminated text chunk written before exit must be preserved: " + textOut.StdOut);
+
+            // 2. 二进制模式：父进程写出 PNG 前缀字节并退出，子进程继续持有管道
+            Stopwatch swBin = Stopwatch.StartNew();
+            CommandOutput binOut = ProcessRunner.RunBinary(
+                psExe,
+                new string[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "binary", pidBinFile },
+                10000,
+                null,
+                null,
+                CancellationToken.None,
+                300);
+            swBin.Stop();
+            KillProcessByPidFile(pidBinFile);
+
+            Assert(swBin.ElapsedMilliseconds < 5000, "binary drain timeout should prevent hanging on child pipe");
+            Assert(binOut.ExitCode == 0 && !binOut.TimedOut && !binOut.Cancelled,
+                "parent exit in binary mode should preserve ExitCode=0");
+            Assert(binOut.OutputTimedOut && !binOut.Success && binOut.HasExecutionFailure,
+                "incomplete binary drain must set OutputTimedOut and fail Success");
+            Assert(binOut.StdOutBytes != null && binOut.StdOutBytes.Length == 6 &&
+                   binOut.StdOutBytes[0] == 0x89 && binOut.StdOutBytes[4] == 0x00 && binOut.StdOutBytes[5] == 0xFF,
+                "partial binary bytes written before child held pipe must be preserved instead of null");
+        }
+        finally
+        {
+            KillProcessByPidFile(pidTextFile);
+            KillProcessByPidFile(pidBinFile);
+            try { Directory.Delete(root, true); }
+            catch (Exception) { }
+        }
+    }
+
+    sealed class PartialThrowingStream : Stream
+    {
+        readonly byte[] prefix;
+        int pos;
+        bool thrown;
+
+        public PartialThrowingStream(byte[] prefix)
+        {
+            this.prefix = prefix ?? new byte[0];
+        }
+
+        public override bool CanRead { get { return true; } }
+        public override bool CanSeek { get { return false; } }
+        public override bool CanWrite { get { return false; } }
+        public override long Length { get { throw new NotSupportedException(); } }
+        public override long Position { get { throw new NotSupportedException(); } set { throw new NotSupportedException(); } }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) { throw new NotSupportedException(); }
+        public override void SetLength(long value) { throw new NotSupportedException(); }
+        public override void Write(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (pos < prefix.Length)
+            {
+                int copy = Math.Min(count, prefix.Length - pos);
+                Buffer.BlockCopy(prefix, pos, buffer, offset, copy);
+                pos += copy;
+                return copy;
+            }
+            if (!thrown)
+            {
+                thrown = true;
+                throw new IOException("simulated stream failure");
+            }
+            return 0;
+        }
+    }
+
+    static void TestProcessRunnerReadErrors()
+    {
+        CommandOutput textErrResult = new CommandOutput { ExitCode = 0 };
+        using (PartialThrowingStream stdout = new PartialThrowingStream(Encoding.UTF8.GetBytes("部分文本")))
+        using (MemoryStream stderr = new MemoryStream())
+        {
+            ProcessRunner.CaptureStreamsForTest(stdout, stderr, false, 1000, true, textErrResult);
+        }
+        Assert(!textErrResult.Success && textErrResult.HasExecutionFailure &&
+               !string.IsNullOrWhiteSpace(textErrResult.OutputError) &&
+               textErrResult.OutputError.Contains("simulated stream failure"),
+            "text stream read exception must populate OutputError and fail Success");
+        Assert(textErrResult.StdOut == "部分文本",
+            "text prefix before stream error should be preserved: " + textErrResult.StdOut);
+
+        CommandOutput binErrResult = new CommandOutput { ExitCode = 0 };
+        using (PartialThrowingStream stdout = new PartialThrowingStream(new byte[] { 0x89, 0x50, 0x4E, 0x47 }))
+        using (MemoryStream stderr = new MemoryStream())
+        {
+            ProcessRunner.CaptureStreamsForTest(stdout, stderr, true, 1000, true, binErrResult);
+        }
+        Assert(!binErrResult.Success && binErrResult.HasExecutionFailure &&
+               !string.IsNullOrWhiteSpace(binErrResult.OutputError) &&
+               binErrResult.OutputError.Contains("simulated stream failure"),
+            "binary stream read exception must populate OutputError and fail Success");
+        Assert(binErrResult.StdOutBytes != null && binErrResult.StdOutBytes.Length == 4 &&
+               binErrResult.StdOutBytes[0] == 0x89 && binErrResult.StdOutBytes[3] == 0x47,
+            "binary prefix before stream error should be preserved");
     }
 }

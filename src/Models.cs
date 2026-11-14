@@ -100,9 +100,30 @@ internal sealed class CommandOutput
 {
     public int ExitCode;
     public string StdOut;
+    public byte[] StdOutBytes;
     public string StdErr;
     public bool TimedOut;
+    public bool Cancelled;
+    public bool OutputTimedOut;
     public string LaunchError;
+    public string OutputError;
+
+    public bool HasExecutionFailure
+    {
+        get
+        {
+            return TimedOut
+                || Cancelled
+                || OutputTimedOut
+                || !string.IsNullOrWhiteSpace(LaunchError)
+                || !string.IsNullOrWhiteSpace(OutputError);
+        }
+    }
+
+    public bool Success
+    {
+        get { return !HasExecutionFailure && ExitCode == 0; }
+    }
 
     public string CombinedOutput
     {
@@ -113,5 +134,17 @@ internal sealed class CommandOutput
             if (a.Length > 0 && b.Length > 0) return a + Environment.NewLine + b;
             return a.Length > 0 ? a : b;
         }
+    }
+
+    public string GetFailureSummary(string fallback, string timeoutMessage = "命令执行超时", string cancelledMessage = "操作已取消")
+    {
+        if (!string.IsNullOrWhiteSpace(LaunchError)) return LaunchError.Trim();
+        if (Cancelled) return cancelledMessage;
+        if (TimedOut) return timeoutMessage;
+        if (!string.IsNullOrWhiteSpace(OutputError)) return OutputError.Trim();
+        if (OutputTimedOut) return "命令输出未读取完整（等待输出流结束超时）。";
+        string combined = CombinedOutput;
+        if (!string.IsNullOrWhiteSpace(combined)) return combined;
+        return string.IsNullOrWhiteSpace(fallback) ? "命令执行失败" : fallback;
     }
 }

@@ -17,13 +17,13 @@ internal sealed class DeviceRunner
         this.config = config;
     }
 
-    public ScanResult Scan()
+    public ScanResult Scan(CancellationToken cancellationToken = default)
     {
         CommandOutput devOut = null;
         CommandOutput mdnsOut = null;
 
-        Thread t1 = new Thread(delegate() { devOut = RunAdb("devices -l", 6000); });
-        Thread t2 = new Thread(delegate() { mdnsOut = RunAdb("mdns services", 6000); });
+        Thread t1 = new Thread(delegate() { devOut = RunAdb(new string[] { "devices", "-l" }, 6000, cancellationToken); });
+        Thread t2 = new Thread(delegate() { mdnsOut = RunAdb(new string[] { "mdns", "services" }, 6000, cancellationToken); });
         t1.IsBackground = true;
         t2.IsBackground = true;
         t1.Start();
@@ -39,21 +39,29 @@ internal sealed class DeviceRunner
         {
             result.Warning = "ADB 调用失败: " + devOut.LaunchError;
         }
+        else if (devOut != null && devOut.Cancelled)
+        {
+            result.Warning = "ADB 扫描已取消。";
+        }
         else if (devOut != null && devOut.TimedOut)
         {
             result.Warning = "adb devices 执行超时，可尝试点击「重启 ADB」。";
         }
-        else if (mdnsOut != null && mdnsOut.ExitCode != 0 && !string.IsNullOrWhiteSpace(mdnsOut.StdErr))
+        else if (devOut != null && (devOut.OutputTimedOut || !string.IsNullOrWhiteSpace(devOut.OutputError)))
         {
-            result.Warning = "mDNS 查询提示: " + mdnsOut.StdErr.Trim();
+            result.Warning = "adb devices 输出读取不完整: " + devOut.GetFailureSummary("输出异常");
+        }
+        else if (mdnsOut != null && (mdnsOut.HasExecutionFailure || (mdnsOut.ExitCode != 0 && !string.IsNullOrWhiteSpace(mdnsOut.StdErr))))
+        {
+            result.Warning = "mDNS 查询提示: " + mdnsOut.GetFailureSummary(mdnsOut.StdErr != null ? mdnsOut.StdErr.Trim() : "");
         }
 
         FilterAndAppendWirelessEndpoints(result);
-        EnrichConnectedSerials(result);
+        EnrichConnectedSerials(result, cancellationToken);
         return result;
     }
 
-    void EnrichConnectedSerials(ScanResult result)
+    void EnrichConnectedSerials(ScanResult result, CancellationToken cancellationToken)
     {
         List<DeviceItem> missing = new List<DeviceItem>();
         for (int i = 0; i < result.Devices.Count; i++)
@@ -73,8 +81,8 @@ internal sealed class DeviceRunner
         RunParallelAndWait(missing.Count, delegate(int i)
         {
             string target = missing[i].AdbSerial;
-            CommandOutput outp = RunAdb("-s " + QuoteArg(target) + " shell getprop ro.serialno", 1500);
-            if (outp.ExitCode == 0 && !outp.TimedOut && !string.IsNullOrWhiteSpace(outp.StdOut))
+            CommandOutput outp = RunAdb(new string[] { "-s", target, "shell", "getprop", "ro.serialno" }, 1500, cancellationToken);
+            if (outp.Success && !string.IsNullOrWhiteSpace(outp.StdOut))
             {
                 string sn = outp.StdOut.Trim();
                 if (sn.IndexOfAny(new char[] { '\r', '\n', ' ' }) < 0)
@@ -237,15 +245,38 @@ internal sealed class DeviceRunner
         }
     }
 
-    public CommandOutput RunAdb(string arguments, int timeoutMs)
+    public ToolResolutionResult ResolveAdbPath()
     {
-        return RunProcess(ResolveExecutable(config.adbPath, "adb"), arguments, timeoutMs);
+        return ToolPathResolver.ResolveTool(config != null ? config.adbPath : "adb", "adb");
     }
 
-    public List<PairingServiceInfo> ListPairingServices()
+    public ToolResolutionResult ResolveScrcpyPath()
     {
-        CommandOutput mdnsOut = RunAdb("mdns services", 3000);
-        return (mdnsOut != null && mdnsOut.ExitCode == 0)
+        return ToolPathResolver.ResolveTool(config != null ? config.scrcpyPath : "scrcpy", "scrcpy");
+    }
+
+    public CommandOutput RunAdb(IList<string> args, int timeoutMs, CancellationToken cancellationToken = default)
+    {
+        ToolResolutionResult adbRes = ResolveAdbPath();
+        if (!adbRes.Success)
+        {
+            return new CommandOutput
+            {
+                ExitCode = -1,
+                LaunchError = adbRes.Error
+            };
+        }
+
+        Dictionary<string, string> env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // 禁止 adb 后台服务按 mDNS 广播自动连接无线设备，将「扫描」与「手动连接」彻底分离。
+        env["ADB_MDNS_AUTO_CONNECT"] = "0";
+        return ProcessRunner.RunText(adbRes.ResolvedPath, args, timeoutMs, env, AppContext.BaseDirectory, cancellationToken);
+    }
+
+    public List<PairingServiceInfo> ListPairingServices(CancellationToken cancellationToken = default)
+    {
+        CommandOutput mdnsOut = RunAdb(new string[] { "mdns", "services" }, 3000, cancellationToken);
+        return (mdnsOut != null && mdnsOut.Success)
             ? AdbScanner.ParsePairingServices(mdnsOut.StdOut)
             : new List<PairingServiceInfo>();
     }
@@ -320,15 +351,10 @@ internal sealed class DeviceRunner
     {
         msg = "";
         error = "";
-        CommandOutput outp = RunAdb("connect " + QuoteArg(endpoint), 5000);
-        if (!string.IsNullOrWhiteSpace(outp.LaunchError))
+        CommandOutput outp = RunAdb(new string[] { "connect", endpoint }, 5000);
+        if (outp.HasExecutionFailure)
         {
-            error = outp.LaunchError;
-            return false;
-        }
-        if (outp.TimedOut)
-        {
-            error = "连接超时";
+            error = outp.GetFailureSummary("adb connect 失败", "连接超时", "连接已取消");
             return false;
         }
         msg = outp.CombinedOutput;
@@ -391,15 +417,10 @@ internal sealed class DeviceRunner
     bool RunSingleDisconnect(string target, out string error)
     {
         error = "";
-        CommandOutput outp = RunAdb("disconnect " + QuoteArg(target), 5000);
-        if (!string.IsNullOrWhiteSpace(outp.LaunchError))
+        CommandOutput outp = RunAdb(new string[] { "disconnect", target }, 5000);
+        if (outp.HasExecutionFailure)
         {
-            error = outp.LaunchError;
-            return false;
-        }
-        if (outp.TimedOut)
-        {
-            error = "断开超时";
+            error = outp.GetFailureSummary("adb disconnect 失败", "断开超时", "断开已取消");
             return false;
         }
 
@@ -473,15 +494,10 @@ internal sealed class DeviceRunner
 
     public bool PairEndpoint(string endpoint, string code, out string message)
     {
-        CommandOutput outp = RunAdb("pair " + QuoteArg(endpoint) + " " + QuoteArg(code), 8000);
-        if (!string.IsNullOrWhiteSpace(outp.LaunchError))
+        CommandOutput outp = RunAdb(new string[] { "pair", endpoint, code }, 8000);
+        if (outp.HasExecutionFailure)
         {
-            message = outp.LaunchError;
-            return false;
-        }
-        if (outp.TimedOut)
-        {
-            message = "配对超时，请核对手机屏幕上显示的 IP:Port 与配对码。";
+            message = outp.GetFailureSummary("配对失败", "配对超时，请核对手机屏幕上显示的 IP:Port 与配对码。", "配对已取消。");
             return false;
         }
 
@@ -491,11 +507,13 @@ internal sealed class DeviceRunner
         return ok;
     }
 
-    public bool LaunchScrcpy(string activeSerial, string windowTitle, List<string> extraArgs, out string error)
+    internal static ProcessStartInfo BuildScrcpyStartInfo(
+        string scrcpyExe,
+        string adbExe,
+        string activeSerial,
+        string windowTitle,
+        List<string> extraArgs)
     {
-        error = "";
-        string exe = ResolveExecutable(config.scrcpyPath, "scrcpy");
-
         List<string> args = new List<string>();
         args.Add("-s");
         args.Add(activeSerial);
@@ -514,12 +532,34 @@ internal sealed class DeviceRunner
             }
         }
 
-        ProcessStartInfo psi = new ProcessStartInfo();
-        psi.FileName = exe;
-        psi.Arguments = JoinArgs(args);
-        psi.UseShellExecute = false;
-        psi.CreateNoWindow = true;
-        psi.WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory;
+        Dictionary<string, string> env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(adbExe))
+        {
+            env["ADB"] = adbExe;
+        }
+        env["ADB_MDNS_AUTO_CONNECT"] = "0";
+
+        return ProcessRunner.BuildStartInfo(scrcpyExe, args, env, AppContext.BaseDirectory, false, false);
+    }
+
+    public bool LaunchScrcpy(string activeSerial, string windowTitle, List<string> extraArgs, out string error)
+    {
+        error = "";
+        ToolResolutionResult scrcpyRes = ResolveScrcpyPath();
+        if (!scrcpyRes.Success)
+        {
+            error = scrcpyRes.Error;
+            return false;
+        }
+
+        ToolResolutionResult adbRes = ResolveAdbPath();
+        if (!adbRes.Success)
+        {
+            error = adbRes.Error;
+            return false;
+        }
+
+        ProcessStartInfo psi = BuildScrcpyStartInfo(scrcpyRes.ResolvedPath, adbRes.ResolvedPath, activeSerial, windowTitle, extraArgs);
 
         try
         {
@@ -547,110 +587,59 @@ internal sealed class DeviceRunner
         }
     }
 
-    public bool CaptureScreenshot(string activeSerial, out Bitmap bitmap, out string error)
+    public bool CaptureScreenshot(string activeSerial, out Bitmap bitmap, out string error, CancellationToken cancellationToken = default)
     {
         bitmap = null;
         error = "";
-        string adbExe = ResolveExecutable(config.adbPath, "adb");
-
-        ProcessStartInfo psi = new ProcessStartInfo();
-        psi.FileName = adbExe;
-        psi.Arguments = "-s " + QuoteArg(activeSerial) + " exec-out screencap -p";
-        psi.UseShellExecute = false;
-        psi.CreateNoWindow = true;
-        psi.RedirectStandardOutput = true;
-        psi.RedirectStandardError = true;
-        psi.StandardErrorEncoding = Encoding.UTF8;
-
-        StringBuilder stderr = new StringBuilder();
-        object errSync = new object();
-        using (Process proc = new Process())
+        ToolResolutionResult adbRes = ResolveAdbPath();
+        if (!adbRes.Success)
         {
-            proc.StartInfo = psi;
-            proc.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e)
-            {
-                if (e.Data != null)
-                {
-                    lock (errSync) { stderr.AppendLine(e.Data); }
-                }
-            };
+            error = adbRes.Error;
+            return false;
+        }
 
-            try
-            {
-                proc.Start();
-            }
-            catch (Exception ex)
-            {
-                error = "启动 adb 截屏失败: " + ex.Message;
-                return false;
-            }
+        Dictionary<string, string> env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        env["ADB_MDNS_AUTO_CONNECT"] = "0";
 
-            proc.BeginErrorReadLine();
+        CommandOutput outp = ProcessRunner.RunBinary(
+            adbRes.ResolvedPath,
+            new string[] { "-s", activeSerial, "exec-out", "screencap", "-p" },
+            12000,
+            env,
+            AppContext.BaseDirectory,
+            cancellationToken);
 
-            byte[] bytes = null;
-            Exception readEx = null;
-            Thread reader = new Thread(delegate()
-            {
-                try
-                {
-                    using (MemoryStream ms = new MemoryStream())
-                    {
-                        byte[] buf = new byte[16384];
-                        Stream baseStream = proc.StandardOutput.BaseStream;
-                        int read;
-                        while ((read = baseStream.Read(buf, 0, buf.Length)) > 0)
-                        {
-                            ms.Write(buf, 0, read);
-                        }
-                        bytes = ms.ToArray();
-                    }
-                }
-                catch (Exception ex)
-                {
-                    readEx = ex;
-                }
-            });
-            reader.IsBackground = true;
-            reader.Start();
+        if (outp.HasExecutionFailure)
+        {
+            error = outp.GetFailureSummary(
+                "读取截图数据失败。",
+                "截屏超时，请确认设备屏幕正常且 ADB 连接未断开。",
+                "截屏已取消。");
+            return false;
+        }
 
-            if (!reader.Join(12000) || !proc.WaitForExit(3000))
-            {
-                try { proc.Kill(); }
-                catch (Exception) { }
-                error = "截屏超时，请确认设备屏幕正常且 ADB 连接未断开。";
-                return false;
-            }
+        if (outp.ExitCode != 0 || !IsPngHeader(outp.StdOutBytes))
+        {
+            string errText = (outp.StdErr ?? "").Trim();
+            error = string.IsNullOrWhiteSpace(errText)
+                ? "设备未能返回有效的 PNG 截图数据。"
+                : errText;
+            return false;
+        }
 
-            if (readEx != null)
+        try
+        {
+            using (MemoryStream ms = new MemoryStream(outp.StdOutBytes))
+            using (Bitmap raw = new Bitmap(ms))
             {
-                error = "读取截图数据失败: " + readEx.Message;
-                return false;
+                bitmap = new Bitmap(raw);
             }
-
-            if (proc.ExitCode != 0 || !IsPngHeader(bytes))
-            {
-                string errText;
-                lock (errSync) { errText = stderr.ToString().Trim(); }
-                error = string.IsNullOrWhiteSpace(errText)
-                    ? "设备未能返回有效的 PNG 截图数据。"
-                    : errText;
-                return false;
-            }
-
-            try
-            {
-                using (MemoryStream ms = new MemoryStream(bytes))
-                using (Bitmap raw = new Bitmap(ms))
-                {
-                    bitmap = new Bitmap(raw);
-                }
-                return true;
-            }
-            catch (Exception ex)
-            {
-                error = "解析截图图像失败: " + ex.Message;
-                return false;
-            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = "解析截图图像失败: " + ex.Message;
+            return false;
         }
     }
 
@@ -664,8 +653,15 @@ internal sealed class DeviceRunner
             return false;
         }
 
-        string adbExe = ResolveExecutable(config.adbPath, "adb");
-        string workDir = NormalizeDirForCli(AppDomain.CurrentDomain.BaseDirectory);
+        ToolResolutionResult adbRes = ResolveAdbPath();
+        if (!adbRes.Success)
+        {
+            error = adbRes.Error;
+            return false;
+        }
+
+        string adbExe = adbRes.ResolvedPath;
+        string workDir = NormalizeDirForCli(AppContext.BaseDirectory);
         string wtExe = ResolveWtExecutable();
         string pwshExe = ResolvePwshExecutable();
         string psExe = string.IsNullOrEmpty(pwshExe) ? "powershell.exe" : pwshExe;
@@ -673,7 +669,7 @@ internal sealed class DeviceRunner
 
         ProcessStartInfo psi = new ProcessStartInfo();
         psi.UseShellExecute = true;
-        psi.WorkingDirectory = Directory.Exists(workDir) ? workDir : AppDomain.CurrentDomain.BaseDirectory;
+        psi.WorkingDirectory = Directory.Exists(workDir) ? workDir : AppContext.BaseDirectory;
 
         if (!string.IsNullOrEmpty(wtExe))
         {
@@ -715,7 +711,7 @@ internal sealed class DeviceRunner
             string aliasPath = Path.Combine(localApp, "Microsoft", "WindowsApps", "wt.exe");
             if (File.Exists(aliasPath)) return aliasPath;
         }
-        return FindExecutableInPath("wt.exe");
+        return ToolPathResolver.FindExecutableInPath("wt.exe");
     }
 
     internal static string ResolvePwshExecutable()
@@ -733,25 +729,7 @@ internal sealed class DeviceRunner
             string stdPath = Path.Combine(progFiles, "PowerShell", "7", "pwsh.exe");
             if (File.Exists(stdPath)) return stdPath;
         }
-        return FindExecutableInPath("pwsh.exe");
-    }
-
-    static string FindExecutableInPath(string exeName)
-    {
-        string pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
-        string[] dirs = pathEnv.Split(new char[] { Path.PathSeparator }, StringSplitOptions.RemoveEmptyEntries);
-        for (int i = 0; i < dirs.Length; i++)
-        {
-            try
-            {
-                string trimmed = dirs[i].Trim();
-                if (trimmed.Length == 0) continue;
-                string candidate = Path.Combine(trimmed, exeName);
-                if (File.Exists(candidate)) return candidate;
-            }
-            catch { }
-        }
-        return null;
+        return ToolPathResolver.FindExecutableInPath("pwsh.exe");
     }
 
     internal static string BuildWtTerminalArguments(string adbExe, string psExe, string activeSerial, string displayTitle, string workDir, TerminalMode mode)
@@ -861,125 +839,6 @@ internal sealed class DeviceRunner
         if (data == null || data.Length < 8) return false;
         return data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47
             && data[4] == 0x0D && data[5] == 0x0A && data[6] == 0x1A && data[7] == 0x0A;
-    }
-
-    static CommandOutput RunProcess(string exe, string arguments, int timeoutMs)
-    {
-        CommandOutput result = new CommandOutput();
-        ProcessStartInfo psi = new ProcessStartInfo();
-        psi.FileName = exe;
-        psi.Arguments = arguments;
-        psi.UseShellExecute = false;
-        psi.CreateNoWindow = true;
-        // 禁止 adb 后台服务按 mDNS 广播自动连接无线设备，将「扫描」与「手动连接」彻底分离。
-        psi.EnvironmentVariables["ADB_MDNS_AUTO_CONNECT"] = "0";
-        psi.RedirectStandardOutput = true;
-        psi.RedirectStandardError = true;
-        psi.StandardOutputEncoding = Encoding.UTF8;
-        psi.StandardErrorEncoding = Encoding.UTF8;
-
-        StringBuilder stdout = new StringBuilder();
-        StringBuilder stderr = new StringBuilder();
-        object sync = new object();
-
-        using (Process proc = new Process())
-        {
-            proc.StartInfo = psi;
-            using (ManualResetEvent outDone = new ManualResetEvent(false))
-            using (ManualResetEvent errDone = new ManualResetEvent(false))
-            {
-                proc.OutputDataReceived += delegate(object s, DataReceivedEventArgs e)
-                {
-                    if (e.Data == null)
-                    {
-                        try { outDone.Set(); }
-                        catch (ObjectDisposedException) { }
-                    }
-                    else
-                    {
-                        lock (sync) { stdout.AppendLine(e.Data); }
-                    }
-                };
-                proc.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e)
-                {
-                    if (e.Data == null)
-                    {
-                        try { errDone.Set(); }
-                        catch (ObjectDisposedException) { }
-                    }
-                    else
-                    {
-                        lock (sync) { stderr.AppendLine(e.Data); }
-                    }
-                };
-
-                try
-                {
-                    proc.Start();
-                }
-                catch (Exception ex)
-                {
-                    result.ExitCode = -1;
-                    result.LaunchError = ex.Message;
-                    return result;
-                }
-
-                proc.BeginOutputReadLine();
-                proc.BeginErrorReadLine();
-
-                if (!proc.WaitForExit(timeoutMs))
-                {
-                    result.TimedOut = true;
-                    result.ExitCode = -1;
-                    try { proc.Kill(); }
-                    catch (Exception) { }
-                    try { proc.WaitForExit(500); }
-                    catch (Exception) { }
-                    outDone.WaitOne(200);
-                    errDone.WaitOne(200);
-                }
-                else
-                {
-                    outDone.WaitOne(1000);
-                    errDone.WaitOne(1000);
-                    result.ExitCode = proc.ExitCode;
-                }
-            }
-        }
-
-        lock (sync)
-        {
-            result.StdOut = stdout.ToString();
-            result.StdErr = stderr.ToString();
-        }
-        return result;
-    }
-
-    static string ResolveExecutable(string configured, string fallbackName)
-    {
-        string raw = string.IsNullOrWhiteSpace(configured) ? fallbackName : configured.Trim();
-        if (File.Exists(raw)) return raw;
-
-        string localCandidate = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, raw);
-        if (File.Exists(localCandidate)) return localCandidate;
-
-        if (!raw.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
-        {
-            if (File.Exists(localCandidate + ".exe")) return localCandidate + ".exe";
-        }
-        return raw;
-    }
-
-    public static string JoinArgs(List<string> args)
-    {
-        if (args == null || args.Count == 0) return "";
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < args.Count; i++)
-        {
-            if (i > 0) sb.Append(' ');
-            sb.Append(QuoteArg(args[i]));
-        }
-        return sb.ToString();
     }
 
     public static string QuoteArg(string arg)

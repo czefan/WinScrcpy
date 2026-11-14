@@ -119,9 +119,25 @@ internal sealed class MainForm : Form
         manageSavedItem = new ToolStripMenuItem("管理常用地址…");
         manageSavedItem.Click += OnOpenManageSavedDialog;
         disconnectAllItem = new ToolStripMenuItem("断开全部无线连接");
-        disconnectAllItem.Click += delegate { RunGlobalAdbAction("正在断开无线连接...", delegate { runner.RunAdb("disconnect", 4000); }); };
+        disconnectAllItem.Click += delegate
+        {
+            RunGlobalAdbAction("正在断开无线连接...", delegate
+            {
+                CommandOutput r = runner.RunAdb(new string[] { "disconnect" }, 4000);
+                return r.Success ? null : r.GetFailureSummary("断开无线连接失败");
+            });
+        };
         restartAdbItem = new ToolStripMenuItem("重启 ADB 服务");
-        restartAdbItem.Click += delegate { RunGlobalAdbAction("正在重启 ADB 服务...", delegate { runner.RunAdb("kill-server", 4000); runner.RunAdb("start-server", 6000); }); };
+        restartAdbItem.Click += delegate
+        {
+            RunGlobalAdbAction("正在重启 ADB 服务...", delegate
+            {
+                CommandOutput kill = runner.RunAdb(new string[] { "kill-server" }, 4000);
+                if (!kill.Success) return kill.GetFailureSummary("停止 ADB 服务失败");
+                CommandOutput start = runner.RunAdb(new string[] { "start-server" }, 6000);
+                return start.Success ? null : start.GetFailureSummary("启动 ADB 服务失败");
+            });
+        };
         moreMenu.Items.Add(manageSavedItem);
         moreMenu.Items.Add(new ToolStripSeparator());
         moreMenu.Items.Add(disconnectAllItem);
@@ -304,9 +320,40 @@ internal sealed class MainForm : Form
         }
     }
 
-    static void RunAsync(Action work)
+    internal bool IsBusyState
     {
-        ThreadPool.QueueUserWorkItem(delegate { work(); });
+        get { return isBusy; }
+    }
+
+    internal void RunBusyActionForTest(string statusText, Action work, string failureContext = "操作失败")
+    {
+        SetBusy(true, statusText, UiTheme.AccentBlue);
+        RunAsync(work, failureContext);
+    }
+
+    void RunAsync(Action work, string failureContext = "操作失败")
+    {
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            try
+            {
+                work();
+            }
+            catch (OperationCanceledException)
+            {
+                SafeUi(delegate()
+                {
+                    SetBusy(false, "操作已取消", UiTheme.StatusOrange);
+                });
+            }
+            catch (Exception ex)
+            {
+                SafeUi(delegate()
+                {
+                    SetBusy(false, failureContext + ": " + ex.Message, UiTheme.StatusRed);
+                });
+            }
+        });
     }
 
     void SafeUi(Action action)
@@ -317,7 +364,17 @@ internal sealed class MainForm : Form
             Invoke((MethodInvoker)delegate()
             {
                 if (IsDisposed || Disposing) return;
-                action();
+                try
+                {
+                    action();
+                }
+                catch (Exception ex)
+                {
+                    if (isBusy)
+                    {
+                        SetBusy(false, "界面更新失败: " + ex.Message, UiTheme.StatusRed);
+                    }
+                }
             });
         }
         catch (Exception) { }
@@ -342,7 +399,7 @@ internal sealed class MainForm : Form
                 UpdateStatusTone(result);
                 SetBusy(false, BuildScanSummary(result), null);
             });
-        });
+        }, "扫描设备失败");
     }
 
     static string BuildScanSummary(ScanResult result)
@@ -363,21 +420,28 @@ internal sealed class MainForm : Form
         return string.Format("共发现 {0} 个设备通道", result.Devices.Count);
     }
 
-    void RunGlobalAdbAction(string statusText, Action work)
+    void RunGlobalAdbAction(string statusText, Func<string> work)
     {
         if (isBusy) return;
         SetBusy(true, statusText, UiTheme.AccentBlue);
         RunAsync(delegate()
         {
-            work();
+            string actionErr = work();
             ScanResult scan = runner.Scan();
             SafeUi(delegate()
             {
                 ApplyScanResult(scan);
-                UpdateStatusTone(scan);
-                SetBusy(false, BuildScanSummary(scan), null);
+                if (!string.IsNullOrEmpty(actionErr))
+                {
+                    SetBusy(false, actionErr, UiTheme.StatusRed);
+                }
+                else
+                {
+                    UpdateStatusTone(scan);
+                    SetBusy(false, BuildScanSummary(scan), null);
+                }
             });
-        });
+        }, "执行 ADB 操作失败");
     }
 
     void OnOpenPairDialog(object sender, EventArgs e)
@@ -1055,7 +1119,7 @@ internal sealed class MainForm : Form
                 Color tone = ok ? UiTheme.StatusGreen : UiTheme.StatusRed;
                 SetBusy(false, detail, tone);
             });
-        });
+        }, "无线连接操作失败");
     }
 
     void ExecuteConnectBatch(List<DeviceItem> targets)
@@ -1105,7 +1169,7 @@ internal sealed class MainForm : Form
                 SetBusy(false, string.Format("成功 {0} 台，失败 {1} 台", successCount, failures.Count), UiTheme.StatusRed);
                 MessageBox.Show(this, detail, successCount > 0 ? "部分设备启动失败" : "设备启动失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             });
-        });
+        }, "启动投屏失败");
     }
 
     void ExecuteScreenshot(DeviceItem item, string displayTitle)
@@ -1131,7 +1195,17 @@ internal sealed class MainForm : Form
                 return;
             }
 
-            ScanResult refreshed = wasPending ? runner.Scan() : null;
+            ScanResult refreshed = null;
+            try
+            {
+                refreshed = wasPending ? runner.Scan() : null;
+            }
+            catch
+            {
+                bmp.Dispose();
+                throw;
+            }
+
             if (IsDisposed || Disposing || !IsHandleCreated)
             {
                 bmp.Dispose();
@@ -1158,7 +1232,7 @@ internal sealed class MainForm : Form
                 }
             });
             if (!handledOnUi) bmp.Dispose();
-        });
+        }, "截屏失败");
     }
 
     static bool TrySetClipboardImage(Bitmap bmp, out string error)
@@ -1226,6 +1300,6 @@ internal sealed class MainForm : Form
                 if (refreshed != null) ApplyScanResult(refreshed);
                 SetBusy(false, string.Format("已打开 [{0}] {1} ({2})", displayTitle, modeName, launchedWith), UiTheme.StatusGreen);
             });
-        });
+        }, "打开终端失败");
     }
 }
