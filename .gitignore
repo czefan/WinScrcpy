@@ -2,6 +2,8 @@
 winscrcpy.json
 
 # Build outputs and debug symbols
+bin/
+obj/
 WinScrcpy.exe
 *.pdb
 

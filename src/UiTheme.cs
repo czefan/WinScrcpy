@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
@@ -525,6 +526,7 @@ internal sealed class ModernTextBoxHost : RoundedPanel
         Click += delegate { InnerBox.Focus(); };
     }
 
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public string TextValue
     {
         get { return (InnerBox.Text ?? "").Trim(); }

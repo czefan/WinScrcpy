@@ -1,15 +1,6 @@
 using System;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
-
-[assembly: AssemblyTitle("WinScrcpy")]
-[assembly: AssemblyDescription("Native Windows GUI launcher for scrcpy and wireless ADB")]
-[assembly: AssemblyProduct("WinScrcpy")]
-[assembly: AssemblyCopyright("Copyright (c) 2026 czefan")]
-[assembly: AssemblyVersion("0.1.0.0")]
-[assembly: AssemblyFileVersion("0.1.0.0")]
-[assembly: AssemblyInformationalVersion("0.1.0")]
 
 internal static class Program
 {

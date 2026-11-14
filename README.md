@@ -4,7 +4,7 @@
 
 <h1 align="center">WinScrcpy</h1>
 
-基于 `.NET Framework 4` 与 `WinForms` 编写的 Windows 桌面 `scrcpy` / `adb` 启动器，使用系统自带 `csc.exe` 编译为单文件可执行程序，无后台常驻服务。
+基于 `.NET 10` 与 `WinForms` 编写的 Windows 桌面 `scrcpy` / `adb` 启动器，无后台常驻服务。
 
 ## 功能说明
 
@@ -18,7 +18,7 @@
 
 ## 配置说明（`winscrcpy.json`）
 
-首次启动若不存在 `winscrcpy.json`，程序会自动生成默认配置；也可复制 [winscrcpy.example.json](winscrcpy.example.json) 为 `winscrcpy.json` 后修改：
+程序默认从 `WinScrcpy.exe` 所在目录读取 `winscrcpy.json`（若从旧版迁移或切换构建输出目录，需将原 `winscrcpy.json` 复制到对应产物目录）。首次启动若不存在 `winscrcpy.json`，会自动生成默认配置；也可复制 [winscrcpy.example.json](winscrcpy.example.json) 为 `winscrcpy.json` 后修改：
 
 ```json
 {
@@ -55,27 +55,42 @@
 
 ## 编译与运行
 
-### 运行环境
+### 运行与构建环境
 
-1. Windows 10 或 Windows 11（内置 `.NET Framework 4.x`）。
-2. 已安装 `adb` 与 `scrcpy`，并已加入系统 `PATH` 或在 `winscrcpy.json` 中指定绝对路径。
+1. Windows 10 或 Windows 11（x64）。
+2. 从源码构建需要安装 **.NET 10 SDK**；运行普通构建产物需要 **.NET 10 Desktop Runtime**，自包含单文件发布产物无需额外安装运行时。
+3. 已安装 `adb` 与 `scrcpy`，并已加入系统 `PATH` 或在 `winscrcpy.json` 中指定绝对路径。
 
-### 编译与启动
+### 构建、发布与启动
 
 在项目根目录执行：
 
 ```powershell
+# 普通构建（输出到 bin\Release\net10.0-windows\WinScrcpy.exe）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
-.\WinScrcpy.exe
+.\bin\Release\net10.0-windows\WinScrcpy.exe
 ```
 
-编译产物为当前目录下的 `WinScrcpy.exe`。
+单文件发布与可选图标生成（输出到 `bin\Release\net10.0-windows\win-x64\publish\WinScrcpy.exe`）：
+
+```powershell
+# 框架依赖单文件发布（需目标机具备 .NET 10 Desktop Runtime）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Publish
+
+# 自包含单文件发布（无需预装 .NET 运行时）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Publish -SelfContained
+
+# 可选：重新生成 assets\app.ico 与 assets\icon.png
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\generate-icon.ps1 -Force
+```
+
+也可直接使用 `dotnet build .\WinScrcpy.csproj -c Release` 或 `dotnet publish .\WinScrcpy.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true`。
 
 ### 内置自检与界面预览
 
 ```powershell
-.\WinScrcpy.exe --selftest
-.\WinScrcpy.exe --preview .\preview-out
+.\bin\Release\net10.0-windows\WinScrcpy.exe --selftest
+.\bin\Release\net10.0-windows\WinScrcpy.exe --preview .\preview-out
 ```
 
 ## 目录结构
@@ -85,11 +100,14 @@ WinScrcpy/
 ├─ assets/
 │  ├─ app.ico                   # 应用程序图标
 │  └─ icon.png                  # README 展示图标
-├─ build.ps1                    # 使用系统自带 csc.exe 编译生成 WinScrcpy.exe
+├─ scripts/
+│  └─ generate-icon.ps1         # 可选图标生成脚本
+├─ WinScrcpy.csproj             # .NET 10 WinForms 项目文件
+├─ build.ps1                    # dotnet build / dotnet publish 构建入口
 ├─ winscrcpy.example.json       # 配置文件示例
 ├─ LICENSE                      # MIT 开源协议
 └─ src/
-   ├─ Program.cs                # 程序入口、程序集信息、DPI 感知与命令行参数分发
+   ├─ Program.cs                # 程序入口、DPI 感知与命令行参数分发
    ├─ Models.cs                 # 设备信息与通道状态定义
    ├─ ConfigManager.cs          # JSON 配置解析、端点规范化校验与设备配置匹配
    ├─ AdbScanner.cs             # adb devices 与 mDNS 服务解析归并

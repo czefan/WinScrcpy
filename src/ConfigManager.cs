@@ -3,7 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Text;
-using System.Web.Script.Serialization;
+using System.Text.Encodings.Web;
+using System.Text.Json;
 
 internal sealed class DeviceConfig
 {
@@ -60,6 +61,19 @@ internal sealed class ResolvedDeviceConfig
 
 internal sealed class ConfigManager
 {
+    static readonly JsonSerializerOptions ReadJsonOptions = new JsonSerializerOptions
+    {
+        PropertyNameCaseInsensitive = true,
+        ReadCommentHandling = JsonCommentHandling.Skip,
+        AllowTrailingCommas = true
+    };
+
+    static readonly JsonSerializerOptions WriteJsonOptions = new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
     public readonly string ConfigPath;
 
     public static string DefaultConfigPath
@@ -103,8 +117,7 @@ internal sealed class ConfigManager
 
     public static AppConfig ParseJson(string json)
     {
-        JavaScriptSerializer serializer = new JavaScriptSerializer();
-        AppConfig cfg = serializer.Deserialize<AppConfig>(json);
+        AppConfig cfg = JsonSerializer.Deserialize<AppConfig>(json, ReadJsonOptions);
         if (cfg == null) cfg = AppConfig.CreateDefault();
         if (string.IsNullOrWhiteSpace(cfg.adbPath)) cfg.adbPath = "adb";
         if (string.IsNullOrWhiteSpace(cfg.scrcpyPath)) cfg.scrcpyPath = "scrcpy";
@@ -263,84 +276,27 @@ internal sealed class ConfigManager
     public void Save(AppConfig cfg)
     {
         if (cfg == null) cfg = AppConfig.CreateDefault();
-        StringBuilder sb = new StringBuilder();
-        sb.AppendLine("{");
-        sb.Append("  \"adbPath\": \"").Append(EscapeJson(string.IsNullOrWhiteSpace(cfg.adbPath) ? "adb" : cfg.adbPath)).AppendLine("\",");
-        sb.Append("  \"scrcpyPath\": \"").Append(EscapeJson(string.IsNullOrWhiteSpace(cfg.scrcpyPath) ? "scrcpy" : cfg.scrcpyPath)).AppendLine("\",");
-        AppendStringArrayProperty(sb, 2, "globalArgs", cfg.globalArgs, true);
-        AppendStringArrayProperty(sb, 2, "savedEndpoints", cfg.savedEndpoints, true);
-        sb.Append("  \"devices\": {");
 
-        Dictionary<string, DeviceConfig> devs = cfg.devices ?? new Dictionary<string, DeviceConfig>();
-        if (devs.Count == 0)
+        AppConfig normalized = new AppConfig();
+        normalized.adbPath = string.IsNullOrWhiteSpace(cfg.adbPath) ? "adb" : cfg.adbPath;
+        normalized.scrcpyPath = string.IsNullOrWhiteSpace(cfg.scrcpyPath) ? "scrcpy" : cfg.scrcpyPath;
+        normalized.globalArgs = cfg.globalArgs != null ? new List<string>(cfg.globalArgs) : new List<string>();
+        normalized.savedEndpoints = cfg.savedEndpoints != null ? new List<string>(cfg.savedEndpoints) : new List<string>();
+
+        if (cfg.devices != null)
         {
-            sb.AppendLine("}");
-        }
-        else
-        {
-            sb.AppendLine();
-            int idx = 0;
-            foreach (KeyValuePair<string, DeviceConfig> pair in devs)
+            foreach (KeyValuePair<string, DeviceConfig> pair in cfg.devices)
             {
-                DeviceConfig dc = pair.Value ?? new DeviceConfig();
-                sb.Append("    \"").Append(EscapeJson(pair.Key)).AppendLine("\": {");
-                sb.Append("      \"alias\": \"").Append(EscapeJson(dc.alias)).AppendLine("\",");
-                AppendStringArrayProperty(sb, 6, "args", dc.args, false);
-                sb.Append("    }");
-                if (++idx < devs.Count) sb.Append(",");
-                sb.AppendLine();
-            }
-            sb.AppendLine("  }");
-        }
-
-        sb.AppendLine("}");
-        File.WriteAllText(ConfigPath, sb.ToString(), new UTF8Encoding(false));
-    }
-
-    static void AppendStringArrayProperty(StringBuilder sb, int indentSpaces, string key, List<string> items, bool trailingComma)
-    {
-        string indent = new string(' ', indentSpaces);
-        sb.Append(indent).Append("\"").Append(key).Append("\": [");
-        if (items != null && items.Count > 0)
-        {
-            sb.AppendLine();
-            string itemIndent = new string(' ', indentSpaces + 2);
-            for (int i = 0; i < items.Count; i++)
-            {
-                sb.Append(itemIndent).Append("\"").Append(EscapeJson(items[i])).Append("\"");
-                if (i + 1 < items.Count) sb.Append(",");
-                sb.AppendLine();
-            }
-            sb.Append(indent);
-        }
-        sb.Append("]");
-        if (trailingComma) sb.Append(",");
-        sb.AppendLine();
-    }
-
-    static string EscapeJson(string s)
-    {
-        if (string.IsNullOrEmpty(s)) return "";
-        StringBuilder sb = new StringBuilder(s.Length);
-        for (int i = 0; i < s.Length; i++)
-        {
-            char c = s[i];
-            switch (c)
-            {
-                case '\\': sb.Append("\\\\"); break;
-                case '"': sb.Append("\\\""); break;
-                case '\r': sb.Append("\\r"); break;
-                case '\n': sb.Append("\\n"); break;
-                case '\t': sb.Append("\\t"); break;
-                case '\b': sb.Append("\\b"); break;
-                case '\f': sb.Append("\\f"); break;
-                default:
-                    if (c < 32) sb.AppendFormat("\\u{0:x4}", (int)c);
-                    else sb.Append(c);
-                    break;
+                DeviceConfig src = pair.Value;
+                DeviceConfig dst = new DeviceConfig();
+                dst.alias = src != null && src.alias != null ? src.alias : "";
+                dst.args = src != null && src.args != null ? new List<string>(src.args) : new List<string>();
+                normalized.devices[pair.Key] = dst;
             }
         }
-        return sb.ToString();
+
+        string json = JsonSerializer.Serialize(normalized, WriteJsonOptions) + Environment.NewLine;
+        File.WriteAllText(ConfigPath, json, new UTF8Encoding(false));
     }
 
     public static ResolvedDeviceConfig Resolve(AppConfig config, DeviceItem item)

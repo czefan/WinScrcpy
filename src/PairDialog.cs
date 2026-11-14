@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
@@ -631,10 +632,7 @@ internal sealed class PairDialog : Form
     {
         const string alphabet = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
         byte[] bytes = new byte[length];
-        using (RNGCryptoServiceProvider rng = new RNGCryptoServiceProvider())
-        {
-            rng.GetBytes(bytes);
-        }
+        RandomNumberGenerator.Fill(bytes);
         char[] chars = new char[length];
         for (int i = 0; i < length; i++)
         {
@@ -660,6 +658,7 @@ internal sealed class PairDialog : Form
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         }
 
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         public bool IsActive
         {
             get { return isActive; }
