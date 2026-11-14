@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0). Leave empty to only upload workflow artifacts.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build and run tests
+        shell: powershell
+        run: .\build.ps1 -Test
+
+      - name: Publish and package
+        shell: powershell
+        run: |
+          .\build.ps1 -Publish -Package
+          .\build.ps1 -Publish -SelfContained -Package
+          Get-FileHash -Algorithm SHA256 .\bin\Release\WinScrcpy-win-x64-*.zip |
+            ForEach-Object { "{0}  {1}" -f $_.Hash.ToLowerInvariant(), (Split-Path $_.Path -Leaf) } |
+            Set-Content -Path .\bin\Release\SHA256SUMS.txt -Encoding ASCII
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+          path: |
+            bin/Release/WinScrcpy-win-x64-*.zip
+            bin/Release/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Create or update GitHub Release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          $tag = if ($env:REF_TYPE -eq 'tag') { $env:REF_NAME } else { $env:INPUT_TAG.Trim() }
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            Write-Output "No tag specified; skipped GitHub Release creation."
+            exit 0
+          }
+          $assets = @(
+            ".\bin\Release\WinScrcpy-win-x64-framework-dependent.zip",
+            ".\bin\Release\WinScrcpy-win-x64-selfcontained.zip",
+            ".\bin\Release\SHA256SUMS.txt"
+          )
+          $prevPref = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          & gh release view $tag *> $null
+          $releaseExists = ($LASTEXITCODE -eq 0)
+          $ErrorActionPreference = $prevPref
+          if ($releaseExists) {
+            & gh release upload $tag @assets --clobber
+          } else {
+            $createArgs = @($tag) + $assets + @('--title', $tag, '--generate-notes')
+            if ($tag -match '-') {
+              $createArgs += '--prerelease'
+            }
+            & gh release create @createArgs
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

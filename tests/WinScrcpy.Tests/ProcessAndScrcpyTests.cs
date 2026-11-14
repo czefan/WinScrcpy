@@ -12,6 +12,9 @@ namespace WinScrcpy.Tests;
 
 public sealed class ProcessAndScrcpyTests
 {
+    static readonly UTF8Encoding Utf8Bom = new UTF8Encoding(true);
+    const string PsUtf8OutputSetup = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\r\n";
+
     sealed class PartialThrowingStream : Stream
     {
         readonly byte[] prefix;
@@ -109,6 +112,7 @@ public sealed class ProcessAndScrcpyTests
         string scriptPath = Path.Combine(root, "参数 与 状态.ps1");
         File.WriteAllText(scriptPath,
             "param([string]$mode)\r\n" +
+            PsUtf8OutputSetup +
             "$rest = @($args)\r\n" +
             "if ($mode -eq 'echo') {\r\n" +
             "  [Console]::Out.WriteLine('COUNT=' + $rest.Count)\r\n" +
@@ -131,7 +135,7 @@ public sealed class ProcessAndScrcpyTests
             "  Start-Sleep -Seconds 30\r\n" +
             "  exit 0\r\n" +
             "}\r\n",
-            new UTF8Encoding(false));
+            Utf8Bom);
 
         try
         {
@@ -204,6 +208,7 @@ public sealed class ProcessAndScrcpyTests
 
         File.WriteAllText(scriptPath,
             "param([string]$mode, [string]$pidFile)\r\n" +
+            PsUtf8OutputSetup +
             "if ($mode -eq 'text') {\r\n" +
             "  [Console]::Out.Write('NO_NEWLINE_中文输出')\r\n" +
             "  [Console]::Out.Flush()\r\n" +
@@ -220,7 +225,7 @@ public sealed class ProcessAndScrcpyTests
             "$child = [System.Diagnostics.Process]::Start($psi)\r\n" +
             "[System.IO.File]::WriteAllText($pidFile, $child.Id.ToString())\r\n" +
             "exit 0\r\n",
-            new UTF8Encoding(false));
+            Utf8Bom);
 
         try
         {
@@ -420,6 +425,7 @@ public sealed class ProcessAndScrcpyTests
 
         File.WriteAllText(scriptPath,
             "param([string]$mode, [string]$argA, [string]$argB)\r\n" +
+            PsUtf8OutputSetup +
             "if ($mode -eq 'touch_and_sleep') {\r\n" +
             "  [System.IO.File]::WriteAllText($argA, 'RAN')\r\n" +
             "  Start-Sleep -Seconds 20\r\n" +
@@ -466,7 +472,7 @@ public sealed class ProcessAndScrcpyTests
             "  Start-Sleep -Seconds 20\r\n" +
             "  exit 0\r\n" +
             "}\r\n",
-            new UTF8Encoding(false));
+            Utf8Bom);
 
         int readyPid = 0;
         int detachPid = 0;
@@ -624,11 +630,12 @@ public sealed class ProcessAndScrcpyTests
         Directory.CreateDirectory(root);
         string scriptPath = Path.Combine(root, "child.ps1");
         File.WriteAllText(scriptPath,
+            PsUtf8OutputSetup +
             "[Console]::Out.WriteLine('INFO: Texture: 1080x2400')\r\n" +
             "[Console]::Out.Flush()\r\n" +
             "Start-Sleep -Seconds 5\r\n" +
             "exit 0\r\n",
-            new UTF8Encoding(false));
+            Utf8Bom);
 
         int childPid = 0;
         try

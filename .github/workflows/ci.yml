@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build and run tests
+        shell: powershell
+        run: .\build.ps1 -Test
+
+      - name: Verify publish packages
+        shell: powershell
+        run: |
+          .\build.ps1 -Publish -Package
+          .\build.ps1 -Publish -SelfContained -Package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WinScrcpy-win-x64-packages
+          path: bin/Release/WinScrcpy-win-x64-*.zip
+          if-no-files-found: error
