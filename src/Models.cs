@@ -148,3 +148,34 @@ internal sealed class CommandOutput
         return string.IsNullOrWhiteSpace(fallback) ? "命令执行失败" : fallback;
     }
 }
+
+internal enum ScrcpyLaunchOutcome
+{
+    StreamReady,
+    ProcessAlive,
+    Failed
+}
+
+internal sealed class ScrcpyLaunchResult
+{
+    public ScrcpyLaunchOutcome Outcome;
+    public bool ProcessStarted;
+    public bool Cancelled;
+    public int ProcessId;
+    public int ExitCode;
+    public string LogFilePath;
+    public string DiagnosticSummary;
+    public string ErrorMessage;
+
+    public bool IsFailure
+    {
+        get { return Outcome == ScrcpyLaunchOutcome.Failed; }
+    }
+
+    public ScrcpyLaunchResult()
+    {
+        LogFilePath = "";
+        DiagnosticSummary = "";
+        ErrorMessage = "";
+    }
+}

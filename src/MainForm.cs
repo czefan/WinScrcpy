@@ -1129,47 +1129,129 @@ internal sealed class MainForm : Form
 
         RunAsync(delegate()
         {
-            List<string> failures = new List<string>();
-            int successCount = 0;
+            int count = targets.Count;
+            string[] readyLines = new string[count];
+            string[] aliveLines = new string[count];
+            string[] failureLines = new string[count];
 
-            for (int i = 0; i < targets.Count; i++)
+            int maxParallel = Math.Min(3, Math.Max(1, count));
+            using (SemaphoreSlim gate = new SemaphoreSlim(maxParallel, maxParallel))
+            using (CountdownEvent done = new CountdownEvent(count))
             {
-                DeviceItem item = targets[i];
-                ResolvedDeviceConfig resolved = ConfigManager.Resolve(config, item);
-
-                string activeSerial;
-                string err;
-                if (!runner.EnsureConnected(item, out activeSerial, out err))
+                for (int i = 0; i < count; i++)
                 {
-                    failures.Add(GetDisplayTitle(item, resolved) + ": " + err);
-                    continue;
-                }
+                    int idx = i;
+                    ThreadPool.QueueUserWorkItem(delegate
+                    {
+                        bool entered = false;
+                        try
+                        {
+                            gate.Wait();
+                            entered = true;
 
-                string badge = item.Channel == ChannelKind.Usb ? item.BadgeText : "无线已连";
-                string title = GetDisplayTitle(item, resolved) + " [" + badge + "]";
-                if (!runner.LaunchScrcpy(activeSerial, title, resolved.Args, out err))
-                {
-                    failures.Add(GetDisplayTitle(item, resolved) + ": " + err);
-                    continue;
+                            DeviceItem item = targets[idx];
+                            ResolvedDeviceConfig resolved = ConfigManager.Resolve(config, item);
+                            string display = GetDisplayTitle(item, resolved);
+
+                            string activeSerial;
+                            string err;
+                            if (!runner.EnsureConnected(item, out activeSerial, out err))
+                            {
+                                failureLines[idx] = display + ": " + err;
+                                return;
+                            }
+
+                            string badge = item.Channel == ChannelKind.Usb ? item.BadgeText : "无线已连";
+                            string title = display + " [" + badge + "]";
+                            ScrcpyLaunchResult res = runner.Scrcpy.Launch(activeSerial, title, resolved.Args);
+                            if (res.Outcome == ScrcpyLaunchOutcome.StreamReady)
+                            {
+                                readyLines[idx] = display + " (" + activeSerial + ")";
+                            }
+                            else if (res.Outcome == ScrcpyLaunchOutcome.ProcessAlive)
+                            {
+                                string aliveDetail = display + " (" + activeSerial + "): " + res.ErrorMessage;
+                                if (!string.IsNullOrWhiteSpace(res.LogFilePath))
+                                {
+                                    aliveDetail += "\n  日志: " + res.LogFilePath;
+                                }
+                                aliveLines[idx] = aliveDetail;
+                            }
+                            else
+                            {
+                                failureLines[idx] = display + ": " + res.ErrorMessage;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            failureLines[idx] = "设备启动异常: " + ex.Message;
+                        }
+                        finally
+                        {
+                            if (entered) gate.Release();
+                            done.Signal();
+                        }
+                    });
                 }
-                successCount++;
+                done.Wait();
             }
 
-            ScanResult refreshed = failures.Count > 0 ? runner.Scan() : null;
+            List<string> readyList = CollectNonEmpty(readyLines);
+            List<string> aliveList = CollectNonEmpty(aliveLines);
+            List<string> failureList = CollectNonEmpty(failureLines);
+
+            // 普通成功流程保持安静（哪怕部分处于未确认画面但进程已启动），仅在存在失败时刷新界面并展开诊断详情。
+            if (failureList.Count == 0)
+            {
+                SafeUi(delegate() { Close(); });
+                return;
+            }
+
+            ScanResult refreshed = runner.Scan();
             SafeUi(delegate()
             {
-                if (failures.Count == 0)
-                {
-                    Close();
-                    return;
-                }
+                ApplyScanResult(refreshed);
 
-                if (refreshed != null) ApplyScanResult(refreshed);
-                string detail = string.Join("\n", failures.ToArray());
-                SetBusy(false, string.Format("成功 {0} 台，失败 {1} 台", successCount, failures.Count), UiTheme.StatusRed);
-                MessageBox.Show(this, detail, successCount > 0 ? "部分设备启动失败" : "设备启动失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                List<string> summaryParts = new List<string>();
+                if (readyList.Count > 0) summaryParts.Add(string.Format("投屏就绪 {0} 台", readyList.Count));
+                if (aliveList.Count > 0) summaryParts.Add(string.Format("已启动(未确认就绪) {0} 台", aliveList.Count));
+                summaryParts.Add(string.Format("失败 {0} 台", failureList.Count));
+                string summary = string.Join("，", summaryParts.ToArray());
+
+                string detail = BuildBatchOutcomeDetail(readyList, aliveList, failureList);
+                SetBusy(false, summary, UiTheme.StatusRed);
+                bool hasAnyStarted = readyList.Count > 0 || aliveList.Count > 0;
+                MessageBox.Show(this, detail, hasAnyStarted ? "部分设备启动失败" : "设备启动失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             });
         }, "启动投屏失败");
+    }
+
+    static List<string> CollectNonEmpty(string[] items)
+    {
+        List<string> list = new List<string>();
+        for (int i = 0; i < items.Length; i++)
+        {
+            if (!string.IsNullOrWhiteSpace(items[i])) list.Add(items[i]);
+        }
+        return list;
+    }
+
+    internal static string BuildBatchOutcomeDetail(List<string> readyLines, List<string> aliveLines, List<string> failureLines)
+    {
+        List<string> sections = new List<string>();
+        if (readyLines.Count > 0)
+        {
+            sections.Add("【已确认投屏就绪】\n" + string.Join("\n", readyLines.ToArray()));
+        }
+        if (aliveLines.Count > 0)
+        {
+            sections.Add("【已启动（未确认画面就绪）】\n" + string.Join("\n", aliveLines.ToArray()));
+        }
+        if (failureLines.Count > 0)
+        {
+            sections.Add("【启动失败】\n" + string.Join("\n\n", failureLines.ToArray()));
+        }
+        return string.Join("\n\n", sections.ToArray());
     }
 
     void ExecuteScreenshot(DeviceItem item, string displayTitle)

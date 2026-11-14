@@ -11,10 +11,12 @@ using System.Threading;
 internal sealed class DeviceRunner
 {
     readonly AppConfig config;
+    public readonly ScrcpyLauncher Scrcpy;
 
     public DeviceRunner(AppConfig config)
     {
         this.config = config;
+        this.Scrcpy = new ScrcpyLauncher(config);
     }
 
     public ScanResult Scan(CancellationToken cancellationToken = default)
@@ -248,11 +250,6 @@ internal sealed class DeviceRunner
     public ToolResolutionResult ResolveAdbPath()
     {
         return ToolPathResolver.ResolveTool(config != null ? config.adbPath : "adb", "adb");
-    }
-
-    public ToolResolutionResult ResolveScrcpyPath()
-    {
-        return ToolPathResolver.ResolveTool(config != null ? config.scrcpyPath : "scrcpy", "scrcpy");
     }
 
     public CommandOutput RunAdb(IList<string> args, int timeoutMs, CancellationToken cancellationToken = default)
@@ -505,86 +502,6 @@ internal sealed class DeviceRunner
         bool ok = outp.ExitCode == 0 && msg.IndexOf("Successfully paired", StringComparison.OrdinalIgnoreCase) >= 0;
         message = string.IsNullOrWhiteSpace(msg) ? (ok ? "配对成功" : "配对失败") : msg;
         return ok;
-    }
-
-    internal static ProcessStartInfo BuildScrcpyStartInfo(
-        string scrcpyExe,
-        string adbExe,
-        string activeSerial,
-        string windowTitle,
-        List<string> extraArgs)
-    {
-        List<string> args = new List<string>();
-        args.Add("-s");
-        args.Add(activeSerial);
-        if (!string.IsNullOrWhiteSpace(windowTitle))
-        {
-            args.Add("--window-title=" + windowTitle);
-        }
-        if (extraArgs != null)
-        {
-            for (int i = 0; i < extraArgs.Count; i++)
-            {
-                if (!string.IsNullOrWhiteSpace(extraArgs[i]))
-                {
-                    args.Add(extraArgs[i]);
-                }
-            }
-        }
-
-        Dictionary<string, string> env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (!string.IsNullOrWhiteSpace(adbExe))
-        {
-            env["ADB"] = adbExe;
-        }
-        env["ADB_MDNS_AUTO_CONNECT"] = "0";
-
-        return ProcessRunner.BuildStartInfo(scrcpyExe, args, env, AppContext.BaseDirectory, false, false);
-    }
-
-    public bool LaunchScrcpy(string activeSerial, string windowTitle, List<string> extraArgs, out string error)
-    {
-        error = "";
-        ToolResolutionResult scrcpyRes = ResolveScrcpyPath();
-        if (!scrcpyRes.Success)
-        {
-            error = scrcpyRes.Error;
-            return false;
-        }
-
-        ToolResolutionResult adbRes = ResolveAdbPath();
-        if (!adbRes.Success)
-        {
-            error = adbRes.Error;
-            return false;
-        }
-
-        ProcessStartInfo psi = BuildScrcpyStartInfo(scrcpyRes.ResolvedPath, adbRes.ResolvedPath, activeSerial, windowTitle, extraArgs);
-
-        try
-        {
-            // Keep stdout/stderr unredirected so the detached scrcpy process never hits a broken pipe after WinScrcpy exits.
-            using (Process proc = Process.Start(psi))
-            {
-                if (proc == null)
-                {
-                    error = "未能启动 scrcpy 进程。";
-                    return false;
-                }
-                Thread.Sleep(250);
-                if (proc.HasExited && proc.ExitCode != 0)
-                {
-                    error = string.Format("scrcpy 立即退出 (退出码 {0})，请检查设备授权或 winscrcpy.json 参数。", proc.ExitCode);
-                    return false;
-                }
-                return true;
-            }
-        }
-        catch (Exception ex)
-        {
-            error = "启动 scrcpy 失败: " + ex.Message;
-            return false;
-        }
     }
 
     public bool CaptureScreenshot(string activeSerial, out Bitmap bitmap, out string error, CancellationToken cancellationToken = default)

@@ -34,6 +34,7 @@ internal static class SelfTests
             TestProcessRunnerPipeHeldByChild();
             TestProcessRunnerReadErrors();
             TestScrcpyEnvironmentAndInvalidConfig();
+            TestScrcpyLogLifecycleAndLaunchJudgment();
             TestUiLayoutNoClipping();
             TestMainFormBusyRecovery();
             Console.WriteLine("SELFTEST PASS");
@@ -990,7 +991,7 @@ internal static class SelfTests
 
     static void TestScrcpyEnvironmentAndInvalidConfig()
     {
-        ProcessStartInfo psi = DeviceRunner.BuildScrcpyStartInfo(
+        ProcessStartInfo psi = ScrcpyLauncher.BuildStartInfo(
             "C:\\工具 空格\\scrcpy.exe",
             "D:\\安卓 工具\\adb.exe",
             "192.168.1.5:5555",
@@ -1017,11 +1018,12 @@ internal static class SelfTests
         Assert(!adbOut.Success && adbOut.LaunchError.Contains("adb") && adbOut.LaunchError.Contains("不存在"),
             "invalid explicit adbPath must fail clearly: " + adbOut.LaunchError);
 
-        string err;
-        Assert(!runner.LaunchScrcpy("serial1", "测试设备", new List<string>(), out err) && err.Contains("scrcpy") && err.Contains("不存在"),
-            "invalid explicit scrcpyPath must fail clearly: " + err);
+        ScrcpyLaunchResult launchRes = runner.Scrcpy.Launch("serial1", "测试设备", new List<string>());
+        Assert(launchRes.IsFailure && !launchRes.ProcessStarted && launchRes.ErrorMessage.Contains("scrcpy") && launchRes.ErrorMessage.Contains("不存在"),
+            "invalid explicit scrcpyPath must fail clearly: " + launchRes.ErrorMessage);
 
         string launchedWith;
+        string err;
         Assert(!runner.OpenDeviceTerminal("serial1", "测试设备", TerminalMode.LocalAdbEnv, out launchedWith, out err) && err.Contains("adb") && err.Contains("不存在"),
             "terminal launcher must reject invalid explicit adbPath: " + err);
     }
@@ -1228,5 +1230,277 @@ internal static class SelfTests
         Assert(binErrResult.StdOutBytes != null && binErrResult.StdOutBytes.Length == 4 &&
                binErrResult.StdOutBytes[0] == 0x89 && binErrResult.StdOutBytes[3] == 0x47,
             "binary prefix before stream error should be preserved");
+    }
+
+    static void KillProcessSafe(int pid)
+    {
+        if (pid <= 0) return;
+        try
+        {
+            using (Process p = Process.GetProcessById(pid))
+            {
+                if (!p.HasExited)
+                {
+                    p.Kill();
+                    p.WaitForExit(1000);
+                }
+            }
+        }
+        catch (Exception) { }
+    }
+
+    static void TestScrcpyLogLifecycleAndLaunchJudgment()
+    {
+        // 1. 参数提示与就绪行匹配规则（仅认确有依据的视频纹理就绪日志）
+        Assert(string.IsNullOrEmpty(ScrcpyLauncher.DetectUnverifiableReadyReason(new string[] { "--stay-awake" })),
+            "default video args should allow INFO ready detection");
+        Assert(!string.IsNullOrEmpty(ScrcpyLauncher.DetectUnverifiableReadyReason(new string[] { "--stay-awake", "--verbosity=warn" })),
+            "verbosity=warn should report unverifiable");
+        Assert(!string.IsNullOrEmpty(ScrcpyLauncher.DetectUnverifiableReadyReason(new string[] { "--no-video", "-V", "ERROR" })),
+            "--no-video and -V ERROR should report unverifiable");
+
+        Assert(ScrcpyLauncher.IsReadyLogLine("INFO: Texture: 1080x2400"), "video mode should match Texture log");
+        Assert(ScrcpyLauncher.IsReadyLogLine("INFO: Initial texture: 1080x2400"), "legacy Initial texture log should match");
+        Assert(!ScrcpyLauncher.IsReadyLogLine("INFO: [server] INFO: Device: Pixel"), "must not treat early server line as stream ready");
+        Assert(ScrcpyLauncher.ExtractDiagnostic("INFO: connecting\nERROR: Could not find any ADB device\nERROR: Server connection failed\n", 4).Contains("Could not find any ADB device"),
+            "diagnostic extractor should prioritize ERROR lines");
+
+        // 2. 批量结果分组展示
+        string batchText = MainForm.BuildBatchOutcomeDetail(
+            new List<string> { "Pixel 9 (usb1)" },
+            new List<string> { "Mi 14 (192.168.1.2:5555): 进程已启动但未确认就绪" },
+            new List<string> { "Tablet: 未知参数" });
+        Assert(batchText.Contains("【已确认投屏就绪】") && batchText.Contains("【已启动（未确认画面就绪）】") && batchText.Contains("【启动失败】"),
+            "batch summary must clearly separate ready, alive-only, and failed items");
+
+        // 3. 启动前已取消 -> 绝不创建进程，也不创建日志文件
+        string root = Path.Combine(Path.GetTempPath(), "WinScrcpy 启动监控 " + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        string psExe = ToolPathResolver.FindExecutableInPath("powershell.exe");
+        Assert(!string.IsNullOrEmpty(psExe), "powershell.exe should exist in PATH");
+
+        string preCancelLog = Path.Combine(root, "precancel.log");
+        string preCancelMarker = Path.Combine(root, "precancel_ran.txt");
+        string scriptPath = Path.Combine(root, "mock_scrcpy.ps1");
+
+        File.WriteAllText(scriptPath,
+            "param([string]$mode, [string]$argA, [string]$argB)\r\n" +
+            "if ($mode -eq 'touch_and_sleep') {\r\n" +
+            "  [System.IO.File]::WriteAllText($argA, 'RAN')\r\n" +
+            "  Start-Sleep -Seconds 20\r\n" +
+            "  exit 0\r\n" +
+            "}\r\n" +
+            "if ($mode -eq 'args') {\r\n" +
+            "  [Console]::Out.WriteLine('ARG_A=' + $argA)\r\n" +
+            "  [Console]::Out.WriteLine('ARG_B=' + $argB)\r\n" +
+            "  [Console]::Out.WriteLine('ENV_ADB=' + $env:ADB)\r\n" +
+            "  [Console]::Out.WriteLine('INFO: Texture: 1200x2000')\r\n" +
+            "  [Console]::Out.Flush()\r\n" +
+            "  Start-Sleep -Seconds 20\r\n" +
+            "  exit 0\r\n" +
+            "}\r\n" +
+            "if ($mode -eq 'immediate_fail') {\r\n" +
+            "  [Console]::Error.WriteLine('unknown option -- invalid-flag-test')\r\n" +
+            "  [Console]::Error.Flush()\r\n" +
+            "  exit 1\r\n" +
+            "}\r\n" +
+            "if ($mode -eq 'delayed_fail') {\r\n" +
+            "  [Console]::Out.WriteLine('INFO: adb reverse ...')\r\n" +
+            "  [Console]::Out.Flush()\r\n" +
+            "  Start-Sleep -Milliseconds 600\r\n" +
+            "  [Console]::Error.WriteLine('ERROR: Device disconnected during startup')\r\n" +
+            "  [Console]::Error.Flush()\r\n" +
+            "  exit 1\r\n" +
+            "}\r\n" +
+            "if ($mode -eq 'ready_and_detach') {\r\n" +
+            "  [Console]::Out.WriteLine('INFO: connecting')\r\n" +
+            "  [Console]::Out.Flush()\r\n" +
+            "  Start-Sleep -Milliseconds 250\r\n" +
+            "  [Console]::Out.WriteLine('INFO: Texture: 1080x2400')\r\n" +
+            "  [Console]::Out.Flush()\r\n" +
+            "  Start-Sleep -Milliseconds 400\r\n" +
+            "  [Console]::Out.WriteLine('POST_DETACH_WRITE_OK')\r\n" +
+            "  [Console]::Out.Flush()\r\n" +
+            "  [System.IO.File]::WriteAllText($argA, 'ALIVE_AFTER_DETACH')\r\n" +
+            "  Start-Sleep -Seconds 20\r\n" +
+            "  exit 0\r\n" +
+            "}\r\n" +
+            "if ($mode -eq 'alive_no_ready') {\r\n" +
+            "  [Console]::Out.WriteLine('INFO: waiting silently...')\r\n" +
+            "  [Console]::Out.Flush()\r\n" +
+            "  Start-Sleep -Seconds 20\r\n" +
+            "  exit 0\r\n" +
+            "}\r\n",
+            new UTF8Encoding(false));
+
+        int readyPid = 0;
+        int detachPid = 0;
+        int alivePid = 0;
+        int postCancelPid = 0;
+
+        try
+        {
+            Dictionary<string, string> env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            env["ADB"] = "D:\\工具 目录\\adb.exe";
+
+            // 3a. 创建前取消 -> ProcessStarted=false, ProcessId=0, 不创建日志和子进程
+            ProcessStartInfo psiPreCancel = ProcessRunner.BuildStartInfo(
+                psExe,
+                new string[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "touch_and_sleep", preCancelMarker },
+                env, root, false, false);
+            DetachedMonitorResult rPreCancel = DetachedProcessLauncher.LaunchWithLogAndMonitor(
+                psiPreCancel, preCancelLog, 5000, ScrcpyLauncher.IsReadyLogLine, new CancellationToken(true));
+            Assert(rPreCancel.Status == DetachedMonitorStatus.Cancelled
+                && !rPreCancel.ProcessStarted
+                && rPreCancel.ProcessId == 0
+                && !File.Exists(preCancelLog)
+                && !File.Exists(preCancelMarker),
+                "pre-cancelled request must not create log file or process");
+
+            // ScrcpyLauncher 级创建前取消
+            ScrcpyLauncher launcher = new ScrcpyLauncher(AppConfig.CreateDefault());
+            ScrcpyLaunchResult sPreCancel = launcher.Launch("serial", "title", new List<string>(), 5000, new CancellationToken(true));
+            Assert(sPreCancel.IsFailure && sPreCancel.Cancelled && !sPreCancel.ProcessStarted && sPreCancel.ProcessId == 0,
+                "ScrcpyLauncher pre-cancelled launch must fail with ProcessStarted=false");
+
+            // 3b. 启动后在监控等待期间取消 -> 保留 ProcessStarted=true, Status=Cancelled, 不杀进程
+            string postCancelLog = Path.Combine(root, "postcancel.log");
+            string postCancelMarker = Path.Combine(root, "postcancel_ran.txt");
+            ProcessStartInfo psiPostCancel = ProcessRunner.BuildStartInfo(
+                psExe,
+                new string[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "touch_and_sleep", postCancelMarker },
+                env, root, false, false);
+            using (CancellationTokenSource postCts = new CancellationTokenSource(350))
+            {
+                DetachedMonitorResult rPostCancel = DetachedProcessLauncher.LaunchWithLogAndMonitor(
+                    psiPostCancel, postCancelLog, 10000, ScrcpyLauncher.IsReadyLogLine, postCts.Token);
+                postCancelPid = rPostCancel.ProcessId;
+                Assert(rPostCancel.Status == DetachedMonitorStatus.Cancelled
+                    && rPostCancel.ProcessStarted
+                    && rPostCancel.ProcessId > 0,
+                    "post-launch cancel must stop waiting while preserving ProcessStarted=true");
+                using (Process p = Process.GetProcessById(postCancelPid))
+                {
+                    Assert(!p.HasExited, "post-launch cancel must leave started child alive");
+                }
+            }
+            KillProcessSafe(postCancelPid);
+            postCancelPid = 0;
+
+            // 3c. 立即参数错误失败
+            string immediateLog = Path.Combine(root, "immediate.log");
+            ProcessStartInfo psiImmediate = ProcessRunner.BuildStartInfo(
+                psExe,
+                new string[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "immediate_fail" },
+                env, root, false, false);
+            DetachedMonitorResult rImmediate = DetachedProcessLauncher.LaunchWithLogAndMonitor(
+                psiImmediate, immediateLog, 5000, ScrcpyLauncher.IsReadyLogLine);
+            Assert(rImmediate.ProcessStarted && rImmediate.Status == DetachedMonitorStatus.Exited && rImmediate.ExitCode == 1,
+                "immediate failure must report Exited with ExitCode=1");
+            Assert(rImmediate.CapturedLog.Contains("unknown option -- invalid-flag-test") && File.Exists(immediateLog),
+                "immediate failure log must be captured and persisted: " + rImmediate.CapturedLog);
+
+            // 3d. 超过旧 250ms 阈值的延迟失败（600ms 后设备断开）
+            string delayedLog = Path.Combine(root, "delayed.log");
+            ProcessStartInfo psiDelayed = ProcessRunner.BuildStartInfo(
+                psExe,
+                new string[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "delayed_fail" },
+                env, root, false, false);
+            DetachedMonitorResult rDelayed = DetachedProcessLauncher.LaunchWithLogAndMonitor(
+                psiDelayed, delayedLog, 5000, ScrcpyLauncher.IsReadyLogLine);
+            Assert(rDelayed.ProcessStarted && rDelayed.Status == DetachedMonitorStatus.Exited && rDelayed.ExitCode == 1,
+                "delayed 600ms failure must be caught instead of 250ms false positive");
+            Assert(rDelayed.CapturedLog.Contains("ERROR: Device disconnected during startup"),
+                "delayed failure diagnostic must preserve stderr: " + rDelayed.CapturedLog);
+
+            // 3e. 命令行参数转义 + 环境变量注入 + 就绪识别
+            string argsLog = Path.Combine(root, "args.log");
+            ProcessStartInfo psiArgs = ProcessRunner.BuildStartInfo(
+                psExe,
+                new string[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "args", "中文 空格", "trail\\slash\"quote" },
+                env, root, false, false);
+            DetachedMonitorResult rArgs = DetachedProcessLauncher.LaunchWithLogAndMonitor(
+                psiArgs, argsLog, 8000, ScrcpyLauncher.IsReadyLogLine);
+            readyPid = rArgs.ProcessId;
+            Assert(rArgs.ProcessStarted && rArgs.Status == DetachedMonitorStatus.MatchedReady,
+                "args process should match ready log immediately: " + rArgs.Status);
+            Assert(rArgs.CapturedLog.Contains("ARG_A=中文 空格")
+                && rArgs.CapturedLog.Contains("ARG_B=trail\\slash\"quote")
+                && rArgs.CapturedLog.Contains("ENV_ADB=D:\\工具 目录\\adb.exe"),
+                "Win32 CreateProcessW command line & env must preserve spaces, Chinese, backslashes, quotes: " + rArgs.CapturedLog);
+            KillProcessSafe(readyPid);
+            readyPid = 0;
+
+            // 3f. 日志就绪后监控器结束并关闭读端 + 日志清理绝不删掉仍在运行会话的日志
+            string detachLog = Path.Combine(root, "scrcpy-99999999-detach.log");
+            string oldUnlocked1 = Path.Combine(root, "scrcpy-00000001-old1.log");
+            string oldUnlocked2 = Path.Combine(root, "scrcpy-00000002-old2.log");
+            string oldUnlocked3 = Path.Combine(root, "scrcpy-00000003-old3.log");
+            File.WriteAllText(oldUnlocked1, "old1");
+            File.WriteAllText(oldUnlocked2, "old2");
+            File.WriteAllText(oldUnlocked3, "old3");
+            // 故意让活跃运行日志的排在最旧文件名，确保若允许 FileShare.Delete 它本会被 PruneOldLogs 删除！
+            string activeLockedLog = Path.Combine(root, "scrcpy-00000000-active.log");
+            string detachMarker = Path.Combine(root, "detached_ok.txt");
+
+            ProcessStartInfo psiDetach = ProcessRunner.BuildStartInfo(
+                psExe,
+                new string[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "ready_and_detach", detachMarker },
+                env, root, false, false);
+            Stopwatch swReady = Stopwatch.StartNew();
+            DetachedMonitorResult rDetach = DetachedProcessLauncher.LaunchWithLogAndMonitor(
+                psiDetach, activeLockedLog, 10000, ScrcpyLauncher.IsReadyLogLine);
+            swReady.Stop();
+            detachPid = rDetach.ProcessId;
+            Assert(rDetach.Status == DetachedMonitorStatus.MatchedReady && swReady.ElapsedMilliseconds < 5000,
+                "ready log should return quickly without waiting full timeout");
+
+            // 模拟超出保留上限（keepCount=1）触发清理
+            DetachedProcessLauncher.PruneOldLogs(root, "scrcpy-*.log", 1);
+            Assert(File.Exists(activeLockedLog), "PruneOldLogs MUST NOT delete log held by running child process");
+            Assert(!File.Exists(oldUnlocked1) && !File.Exists(oldUnlocked2) && File.Exists(oldUnlocked3),
+                "PruneOldLogs should still delete unlocked older logs and keep newest unlocked count");
+            Assert(File.Exists(detachLog) == false, "unused path sanity");
+
+            Stopwatch swPost = Stopwatch.StartNew();
+            while (!File.Exists(detachMarker) && swPost.ElapsedMilliseconds < 3000)
+            {
+                Thread.Sleep(50);
+            }
+            Assert(File.Exists(detachMarker), "child must keep running after monitor detaches");
+            string finalLogText;
+            using (FileStream fsRead = new FileStream(activeLockedLog, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (StreamReader srRead = new StreamReader(fsRead, Encoding.UTF8))
+            {
+                finalLogText = srRead.ReadToEnd();
+            }
+            Assert(finalLogText.Contains("POST_DETACH_WRITE_OK"),
+                "child must still write to physical log file after monitor closes reader & prune runs: " + finalLogText);
+            KillProcessSafe(detachPid);
+            detachPid = 0;
+
+            // 3g. 未匹配就绪但进程持续存活 -> 必须区分为 TimedOutAlive 而非 MatchedReady
+            string aliveLog = Path.Combine(root, "alive.log");
+            ProcessStartInfo psiAlive = ProcessRunner.BuildStartInfo(
+                psExe,
+                new string[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "alive_no_ready" },
+                env, root, false, false);
+            DetachedMonitorResult rAlive = DetachedProcessLauncher.LaunchWithLogAndMonitor(
+                psiAlive, aliveLog, 450, ScrcpyLauncher.IsReadyLogLine);
+            alivePid = rAlive.ProcessId;
+            Assert(rAlive.ProcessStarted && rAlive.Status == DetachedMonitorStatus.TimedOutAlive,
+                "process alive past ready timeout without Texture log must be TimedOutAlive, got: " + rAlive.Status);
+            KillProcessSafe(alivePid);
+            alivePid = 0;
+        }
+        finally
+        {
+            KillProcessSafe(postCancelPid);
+            KillProcessSafe(readyPid);
+            KillProcessSafe(detachPid);
+            KillProcessSafe(alivePid);
+            try { Directory.Delete(root, true); }
+            catch (Exception) { }
+        }
     }
 }
