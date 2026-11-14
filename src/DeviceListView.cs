@@ -147,8 +147,10 @@ internal sealed class DeviceListView : BufferedPanel
         bool alreadyEmpty = Controls.Count == 1 && object.Equals(Controls[0].Tag, "EmptyState");
         if (alreadyEmpty && !forceRebuild) return;
 
+        SuspendLayout();
         ClearAllListControls();
         Controls.Add(BuildEmptyStateView());
+        ResumeLayout(true);
     }
 
     void RebuildCardFromScratch(IList<DeviceItem> devices, DisplaySnapshot snapshot)
@@ -189,12 +191,18 @@ internal sealed class DeviceListView : BufferedPanel
             tableCard.Controls.Add(entry.RowPanel, 0, cellRow++);
         }
 
+        int initialWidth = Math.Max(UiTheme.Scale(this, 420), ClientSize.Width - Padding.Horizontal);
+        tableCard.Left = Padding.Left;
+        tableCard.Top = Padding.Top;
+        tableCard.MinimumSize = new Size(initialWidth, 0);
+        tableCard.MaximumSize = new Size(initialWidth, 0);
+        tableCard.Width = initialWidth;
         tableCard.RowCount = cellRow;
         tableCard.ResumeLayout(false);
 
         SuspendLayout();
         Controls.Add(tableCard);
-        ResumeLayout(true);
+        ResumeLayout(false);
 
         lastLayoutWidth = -1;
         RelayoutCards(forceRelayout: true, explicitScrollY: savedScrollY);
@@ -511,7 +519,9 @@ internal sealed class DeviceListView : BufferedPanel
     Control BuildEmptyStateView()
     {
         TableLayoutPanel host = new TableLayoutPanel();
+        host.SuspendLayout();
         host.Dock = DockStyle.Fill;
+        host.Size = ClientSize;
         host.Tag = "EmptyState";
         host.BackColor = UiTheme.PageBg;
         host.ColumnCount = 3;
@@ -524,6 +534,7 @@ internal sealed class DeviceListView : BufferedPanel
         host.RowStyles.Add(new RowStyle(SizeType.Percent, 50f));
 
         RoundedPanel card = new RoundedPanel();
+        card.SuspendLayout();
         card.AutoSize = true;
         card.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         card.CornerRadiusDp = 12;
@@ -558,8 +569,10 @@ internal sealed class DeviceListView : BufferedPanel
         card.Controls.Add(heading, 0, 0);
         card.Controls.Add(tips, 0, 1);
         card.Controls.Add(emptyScanBtn, 0, 2);
+        card.ResumeLayout(false);
 
         host.Controls.Add(card, 1, 1);
+        host.ResumeLayout(false);
         return host;
     }
 

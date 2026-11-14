@@ -1278,6 +1278,67 @@ public sealed class DiscoveryAndUiTests
         });
     }
 
+    [Fact]
+    public void MainForm_CenteredStartupPlacesHandleAtCenteredCoordinatesBeforeVisible()
+    {
+        StaRunner.Run(() =>
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "winscrcpy_center_start_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            string cfgPath = Path.Combine(tempDir, "winscrcpy.json");
+            try
+            {
+                AppConfig cfg = AppConfig.CreateDefault();
+                ConfigManager mgr = new ConfigManager(cfgPath);
+                mgr.Save(cfg);
+
+                Point? locAtHandleCreated = null;
+                Point? locAtLoad = null;
+                Point? locAtShown = null;
+                Size? sizeAtShown = null;
+
+                using (MainForm form = new MainForm(mgr, cfg, null, false))
+                {
+                    form.ShowInTaskbar = false;
+                    form.HandleCreated += delegate { locAtHandleCreated = form.Location; };
+                    form.Load += delegate { locAtLoad = form.Location; };
+                    form.Shown += delegate
+                    {
+                        locAtShown = form.Location;
+                        sizeAtShown = form.Size;
+                        form.Close();
+                    };
+                    Application.Run(form);
+                }
+
+                Assert.NotNull(locAtHandleCreated);
+                Assert.NotNull(locAtLoad);
+                Assert.NotNull(locAtShown);
+                Assert.NotNull(sizeAtShown);
+
+                Rectangle area = Screen.FromRectangle(new Rectangle(locAtShown.Value, sizeAtShown.Value)).WorkingArea;
+                int expectedX = area.Left + Math.Max(0, (area.Width - sizeAtShown.Value.Width) / 2);
+                int expectedY = area.Top + Math.Max(0, (area.Height - sizeAtShown.Value.Height) / 2);
+                Assert.Equal(expectedX, locAtHandleCreated.Value.X);
+                Assert.Equal(expectedY, locAtHandleCreated.Value.Y);
+                Assert.Equal(locAtHandleCreated.Value, locAtLoad.Value);
+                Assert.Equal(locAtHandleCreated.Value, locAtShown.Value);
+
+                using (MainForm offscreen = new MainForm(mgr, cfg, null, false))
+                {
+                    UiTestHelpers.ShowOffscreen(offscreen);
+                    Assert.Equal(new Point(-32000, -32000), offscreen.Location);
+                    offscreen.Close();
+                }
+            }
+            finally
+            {
+                try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); }
+                catch { }
+            }
+        });
+    }
+
     static List<Control> CollectDeviceRowPanels(Control card)
     {
         List<Control> rows = new List<Control>();

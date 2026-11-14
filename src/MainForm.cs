@@ -36,6 +36,7 @@ internal sealed class MainForm : Form
     Color statusDotColor = UiTheme.StatusGreen;
     bool isActionBusy;
     bool isScanning;
+    bool pendingInitialCenter;
     bool isBusy { get { return isActionBusy || isScanning; } }
     readonly CancellationTokenSource formCts = new CancellationTokenSource();
     CancellationTokenSource activeScanCts;
@@ -233,13 +234,36 @@ internal sealed class MainForm : Form
         }
     }
 
+    protected override void SetVisibleCore(bool value)
+    {
+        if (value && !IsHandleCreated && StartPosition == FormStartPosition.CenterScreen)
+        {
+            pendingInitialCenter = true;
+            CenterInWorkingArea(Screen.FromPoint(Cursor.Position).WorkingArea);
+            StartPosition = FormStartPosition.Manual;
+        }
+        base.SetVisibleCore(value);
+    }
+
     protected override void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
+        if (pendingInitialCenter)
+        {
+            pendingInitialCenter = false;
+            CenterInWorkingArea(Screen.FromControl(this).WorkingArea);
+        }
         if (statusLabel != null)
         {
             statusLabel.Height = statusLabel.PreferredHeight;
         }
+    }
+
+    void CenterInWorkingArea(Rectangle area)
+    {
+        int x = area.Left + Math.Max(0, (area.Width - Width) / 2);
+        int y = area.Top + Math.Max(0, (area.Height - Height) / 2);
+        Location = new Point(x, y);
     }
 
     protected override void OnDpiChanged(DpiChangedEventArgs e)
