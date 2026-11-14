@@ -4,6 +4,44 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
+
+internal sealed class BatchLaunchResult
+{
+    public List<string> ReadyLines = new List<string>();
+    public List<string> AliveLines = new List<string>();
+    public List<string> FailureLines = new List<string>();
+
+    public bool HasFailures { get { return FailureLines.Count > 0; } }
+    public bool HasAnyStarted { get { return ReadyLines.Count > 0 || AliveLines.Count > 0; } }
+
+    public string BuildSummary()
+    {
+        List<string> parts = new List<string>();
+        if (ReadyLines.Count > 0) parts.Add(string.Format("投屏就绪 {0} 台", ReadyLines.Count));
+        if (AliveLines.Count > 0) parts.Add(string.Format("已启动(未确认就绪) {0} 台", AliveLines.Count));
+        if (FailureLines.Count > 0) parts.Add(string.Format("失败 {0} 台", FailureLines.Count));
+        return string.Join("，", parts.ToArray());
+    }
+
+    public string BuildDetail()
+    {
+        List<string> sections = new List<string>();
+        if (ReadyLines.Count > 0)
+        {
+            sections.Add("【已确认投屏就绪】\n" + string.Join("\n", ReadyLines.ToArray()));
+        }
+        if (AliveLines.Count > 0)
+        {
+            sections.Add("【已启动（未确认画面就绪）】\n" + string.Join("\n", AliveLines.ToArray()));
+        }
+        if (FailureLines.Count > 0)
+        {
+            sections.Add("【启动失败】\n" + string.Join("\n\n", FailureLines.ToArray()));
+        }
+        return string.Join("\n\n", sections.ToArray());
+    }
+}
 
 /// <summary>
 /// Builds scrcpy arguments/environment and evaluates launch state
@@ -256,6 +294,131 @@ internal sealed class ScrcpyLauncher
             slice.Add(chosen[i]);
         }
         return string.Join("\n", slice.ToArray());
+    }
+
+    public async Task<BatchLaunchResult> LaunchBatchAsync(
+        IList<DeviceItem> targets,
+        IAdbClient adbClient,
+        Func<DeviceItem, ResolvedDeviceConfig, string> displayTitleSelector,
+        CancellationToken cancellationToken = default,
+        Func<string, string, List<string>, CancellationToken, ScrcpyLaunchResult> launchOverride = null)
+    {
+        BatchLaunchResult outcome = new BatchLaunchResult();
+        if (targets == null || targets.Count == 0) return outcome;
+
+        int count = targets.Count;
+        string[] readyLines = new string[count];
+        string[] aliveLines = new string[count];
+        string[] failureLines = new string[count];
+
+        int maxParallel = Math.Min(3, Math.Max(1, count));
+        Func<string, string, List<string>, CancellationToken, ScrcpyLaunchResult> launchFn =
+            launchOverride ?? ((serial, title, args, ct) => Launch(serial, title, args, DefaultReadyTimeoutMs, ct));
+
+        using (SemaphoreSlim gate = new SemaphoreSlim(maxParallel, maxParallel))
+        {
+            List<Task> tasks = new List<Task>(count);
+            for (int i = 0; i < count; i++)
+            {
+                int idx = i;
+                tasks.Add(LaunchSingleTargetAsync(
+                    targets[idx],
+                    idx,
+                    gate,
+                    adbClient,
+                    displayTitleSelector,
+                    launchFn,
+                    readyLines,
+                    aliveLines,
+                    failureLines,
+                    cancellationToken));
+            }
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+        }
+
+        outcome.ReadyLines = CollectNonEmpty(readyLines);
+        outcome.AliveLines = CollectNonEmpty(aliveLines);
+        outcome.FailureLines = CollectNonEmpty(failureLines);
+        return outcome;
+    }
+
+    async Task LaunchSingleTargetAsync(
+        DeviceItem item,
+        int index,
+        SemaphoreSlim gate,
+        IAdbClient adbClient,
+        Func<DeviceItem, ResolvedDeviceConfig, string> displayTitleSelector,
+        Func<string, string, List<string>, CancellationToken, ScrcpyLaunchResult> launchFn,
+        string[] readyLines,
+        string[] aliveLines,
+        string[] failureLines,
+        CancellationToken cancellationToken)
+    {
+        bool entered = false;
+        try
+        {
+            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            entered = true;
+
+            ResolvedDeviceConfig resolved = ConfigManager.Resolve(config, item);
+            string display = displayTitleSelector != null
+                ? displayTitleSelector(item, resolved)
+                : (!string.IsNullOrWhiteSpace(resolved.Alias) ? resolved.Alias : item.PrimaryEndpointDisplay);
+
+            var conn = await adbClient.EnsureConnectedAsync(item, cancellationToken).ConfigureAwait(false);
+            if (!conn.ok)
+            {
+                failureLines[index] = display + ": " + conn.error;
+                return;
+            }
+
+            string badge = item.Channel == ChannelKind.Usb ? item.BadgeText : "无线已连";
+            string title = display + " [" + badge + "]";
+            ScrcpyLaunchResult res = await Task.Run(delegate
+            {
+                return launchFn(conn.activeSerial, title, resolved.Args, cancellationToken);
+            }, cancellationToken).ConfigureAwait(false);
+
+            if (res.Outcome == ScrcpyLaunchOutcome.StreamReady)
+            {
+                readyLines[index] = display + " (" + conn.activeSerial + ")";
+            }
+            else if (res.Outcome == ScrcpyLaunchOutcome.ProcessAlive)
+            {
+                string aliveDetail = display + " (" + conn.activeSerial + "): " + res.ErrorMessage;
+                if (!string.IsNullOrWhiteSpace(res.LogFilePath))
+                {
+                    aliveDetail += "\n  日志: " + res.LogFilePath;
+                }
+                aliveLines[index] = aliveDetail;
+            }
+            else
+            {
+                failureLines[index] = display + ": " + res.ErrorMessage;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            failureLines[index] = "已取消启动";
+        }
+        catch (Exception ex)
+        {
+            failureLines[index] = "设备启动异常: " + ex.Message;
+        }
+        finally
+        {
+            if (entered) gate.Release();
+        }
+    }
+
+    static List<string> CollectNonEmpty(string[] items)
+    {
+        List<string> list = new List<string>();
+        for (int i = 0; i < items.Length; i++)
+        {
+            if (!string.IsNullOrWhiteSpace(items[i])) list.Add(items[i]);
+        }
+        return list;
     }
 
     static string CreateLogPath(string serial)

@@ -10,7 +10,10 @@ internal sealed class MainForm : Form
 {
     readonly ConfigManager configManager;
     AppConfig config;
-    DeviceRunner runner;
+    AdbClient adbClient;
+    DeviceDiscoveryService discoveryService;
+    ScrcpyLauncher scrcpyLauncher;
+    TerminalLauncher terminalLauncher;
     readonly bool autoScanOnShow;
 
     readonly TableLayoutPanel topBar;
@@ -48,7 +51,7 @@ internal sealed class MainForm : Form
     {
         this.configManager = configManager;
         this.config = config;
-        this.runner = new DeviceRunner(config);
+        InitServices();
         this.autoScanOnShow = autoScanOnShow;
 
         Text = "WinScrcpy";
@@ -129,7 +132,7 @@ internal sealed class MainForm : Form
         {
             RunGlobalAdbAction("正在断开无线连接...", async ct =>
             {
-                CommandOutput r = await runner.RunAdbAsync(new string[] { "disconnect" }, 4000, ct);
+                CommandOutput r = await adbClient.RunAdbAsync(new string[] { "disconnect" }, 4000, ct);
                 return r.Success ? null : r.GetFailureSummary("断开无线连接失败");
             });
         };
@@ -138,9 +141,9 @@ internal sealed class MainForm : Form
         {
             RunGlobalAdbAction("正在重启 ADB 服务...", async ct =>
             {
-                CommandOutput kill = await runner.RunAdbAsync(new string[] { "kill-server" }, 4000, ct);
+                CommandOutput kill = await adbClient.RunAdbAsync(new string[] { "kill-server" }, 4000, ct);
                 if (!kill.Success) return kill.GetFailureSummary("停止 ADB 服务失败");
-                CommandOutput start = await runner.RunAdbAsync(new string[] { "start-server" }, 6000, ct);
+                CommandOutput start = await adbClient.RunAdbAsync(new string[] { "start-server" }, 6000, ct);
                 return start.Success ? null : start.GetFailureSummary("启动 ADB 服务失败");
             });
         };
@@ -321,11 +324,19 @@ internal sealed class MainForm : Form
         statusDot.Invalidate();
     }
 
+    void InitServices()
+    {
+        adbClient = new AdbClient(config);
+        discoveryService = new DeviceDiscoveryService(config, adbClient);
+        scrcpyLauncher = new ScrcpyLauncher(config);
+        terminalLauncher = new TerminalLauncher(adbClient);
+    }
+
     void ReloadConfig()
     {
         string warn;
         config = configManager.LoadOrCreate(out warn);
-        runner = new DeviceRunner(config);
+        InitServices();
         if (!string.IsNullOrEmpty(warn))
         {
             statusLabel.Text = warn;
@@ -403,7 +414,7 @@ internal sealed class MainForm : Form
 
     void StartScan(string customBusyText = null)
     {
-        var _ = ExecuteScanCoreAsync((onStage1, ct) => runner.ScanAsync(onStage1, ct), customBusyText);
+        var _ = ExecuteScanCoreAsync((onStage1, ct) => discoveryService.ScanAsync(onStage1, ct), customBusyText);
     }
 
     internal async Task ExecuteScanCoreAsync(
@@ -522,7 +533,7 @@ internal sealed class MainForm : Form
         try
         {
             string actionErr = await work(ct);
-            ScanResult scan = await runner.ScanAsync(null, ct);
+            ScanResult scan = await discoveryService.ScanAsync(null, ct);
             if (IsDisposed || Disposing) return;
             ApplyScanResult(scan);
             if (!string.IsNullOrEmpty(actionErr))
@@ -561,7 +572,7 @@ internal sealed class MainForm : Form
     void OnOpenPairDialog(object sender, EventArgs e)
     {
         if (isBusy) return;
-        using (PairDialog dlg = new PairDialog(runner, lastPairingServices))
+        using (PairDialog dlg = new PairDialog(adbClient, lastPairingServices))
         {
             if (UiTheme.ShowDialogCentered(this, dlg) == DialogResult.OK && dlg.Paired)
             {
@@ -573,7 +584,7 @@ internal sealed class MainForm : Form
     void OnOpenManualConnectDialog(object sender, EventArgs e)
     {
         if (isBusy) return;
-        using (ManualConnectDialog dlg = new ManualConnectDialog(runner))
+        using (ManualConnectDialog dlg = new ManualConnectDialog(adbClient))
         {
             if (UiTheme.ShowDialogCentered(this, dlg) == DialogResult.OK && dlg.Connected)
             {
@@ -1216,18 +1227,18 @@ internal sealed class MainForm : Form
             bool ok;
             if (isDisconnecting)
             {
-                var res = await runner.DisconnectDeviceAsync(item, ct);
+                var res = await adbClient.DisconnectDeviceAsync(item, ct);
                 ok = res.ok;
                 detail = ok ? ("已断开 [" + displayTitle + "] 无线连接") : ("断开失败: " + res.error);
             }
             else
             {
-                var res = await runner.EnsureConnectedAsync(item, ct);
+                var res = await adbClient.EnsureConnectedAsync(item, ct);
                 ok = res.ok;
                 detail = ok ? string.Format("已连接 [{0}] ({1})", displayTitle, res.activeSerial) : ("连接失败: " + res.error);
             }
 
-            ScanResult refreshed = await runner.ScanAsync(null, ct);
+            ScanResult refreshed = await discoveryService.ScanAsync(null, ct);
             if (IsDisposed || Disposing) return;
             ApplyScanResult(refreshed);
             SetUiBusy(false, false, detail, ok ? UiTheme.StatusGreen : UiTheme.StatusRed);
@@ -1264,50 +1275,27 @@ internal sealed class MainForm : Form
 
         try
         {
-            int count = targets.Count;
-            string[] readyLines = new string[count];
-            string[] aliveLines = new string[count];
-            string[] failureLines = new string[count];
-
-            int maxParallel = Math.Min(3, Math.Max(1, count));
-            using (SemaphoreSlim gate = new SemaphoreSlim(maxParallel, maxParallel))
-            {
-                List<Task> tasks = new List<Task>(count);
-                for (int i = 0; i < count; i++)
-                {
-                    int idx = i;
-                    tasks.Add(RunSingleConnectAsync(targets[idx], idx, gate, readyLines, aliveLines, failureLines, ct));
-                }
-                await Task.WhenAll(tasks);
-            }
-
+            BatchLaunchResult outcome = await scrcpyLauncher.LaunchBatchAsync(targets, adbClient, GetDisplayTitle, ct);
             if (ct.IsCancellationRequested || IsDisposed || Disposing) return;
 
-            List<string> readyList = CollectNonEmpty(readyLines);
-            List<string> aliveList = CollectNonEmpty(aliveLines);
-            List<string> failureList = CollectNonEmpty(failureLines);
-
-            // 普通成功流程保持安静（哪怕部分处于未确认画面但进程已启动），仅在存在失败时刷新界面并展开诊断详情。
-            if (failureList.Count == 0)
+            // 普通成功流程保持安静，仅在存在失败时刷新界面并展开诊断详情。
+            if (!outcome.HasFailures)
             {
                 Close();
                 return;
             }
 
-            ScanResult refreshed = await runner.ScanAsync(null, ct);
+            ScanResult refreshed = await discoveryService.ScanAsync(null, ct);
             if (IsDisposed || Disposing) return;
             ApplyScanResult(refreshed);
 
-            List<string> summaryParts = new List<string>();
-            if (readyList.Count > 0) summaryParts.Add(string.Format("投屏就绪 {0} 台", readyList.Count));
-            if (aliveList.Count > 0) summaryParts.Add(string.Format("已启动(未确认就绪) {0} 台", aliveList.Count));
-            summaryParts.Add(string.Format("失败 {0} 台", failureList.Count));
-            string summary = string.Join("，", summaryParts.ToArray());
-
-            string detail = BuildBatchOutcomeDetail(readyList, aliveList, failureList);
-            SetUiBusy(false, false, summary, UiTheme.StatusRed);
-            bool hasAnyStarted = readyList.Count > 0 || aliveList.Count > 0;
-            MessageBox.Show(this, detail, hasAnyStarted ? "部分设备启动失败" : "设备启动失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            SetUiBusy(false, false, outcome.BuildSummary(), UiTheme.StatusRed);
+            MessageBox.Show(
+                this,
+                outcome.BuildDetail(),
+                outcome.HasAnyStarted ? "部分设备启动失败" : "设备启动失败",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
         }
         catch (OperationCanceledException)
         {
@@ -1332,98 +1320,6 @@ internal sealed class MainForm : Form
         }
     }
 
-    async Task RunSingleConnectAsync(
-        DeviceItem item,
-        int index,
-        SemaphoreSlim gate,
-        string[] readyLines,
-        string[] aliveLines,
-        string[] failureLines,
-        CancellationToken ct)
-    {
-        bool entered = false;
-        try
-        {
-            await gate.WaitAsync(ct);
-            entered = true;
-
-            ResolvedDeviceConfig resolved = ConfigManager.Resolve(config, item);
-            string display = GetDisplayTitle(item, resolved);
-
-            var conn = await runner.EnsureConnectedAsync(item, ct);
-            if (!conn.ok)
-            {
-                failureLines[index] = display + ": " + conn.error;
-                return;
-            }
-
-            string badge = item.Channel == ChannelKind.Usb ? item.BadgeText : "无线已连";
-            string title = display + " [" + badge + "]";
-            ScrcpyLaunchResult res = await Task.Run(delegate
-            {
-                return runner.Scrcpy.Launch(conn.activeSerial, title, resolved.Args, cancellationToken: ct);
-            }, ct);
-
-            if (res.Outcome == ScrcpyLaunchOutcome.StreamReady)
-            {
-                readyLines[index] = display + " (" + conn.activeSerial + ")";
-            }
-            else if (res.Outcome == ScrcpyLaunchOutcome.ProcessAlive)
-            {
-                string aliveDetail = display + " (" + conn.activeSerial + "): " + res.ErrorMessage;
-                if (!string.IsNullOrWhiteSpace(res.LogFilePath))
-                {
-                    aliveDetail += "\n  日志: " + res.LogFilePath;
-                }
-                aliveLines[index] = aliveDetail;
-            }
-            else
-            {
-                failureLines[index] = display + ": " + res.ErrorMessage;
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            failureLines[index] = "已取消启动";
-        }
-        catch (Exception ex)
-        {
-            failureLines[index] = "设备启动异常: " + ex.Message;
-        }
-        finally
-        {
-            if (entered) gate.Release();
-        }
-    }
-
-    static List<string> CollectNonEmpty(string[] items)
-    {
-        List<string> list = new List<string>();
-        for (int i = 0; i < items.Length; i++)
-        {
-            if (!string.IsNullOrWhiteSpace(items[i])) list.Add(items[i]);
-        }
-        return list;
-    }
-
-    internal static string BuildBatchOutcomeDetail(List<string> readyLines, List<string> aliveLines, List<string> failureLines)
-    {
-        List<string> sections = new List<string>();
-        if (readyLines.Count > 0)
-        {
-            sections.Add("【已确认投屏就绪】\n" + string.Join("\n", readyLines.ToArray()));
-        }
-        if (aliveLines.Count > 0)
-        {
-            sections.Add("【已启动（未确认画面就绪）】\n" + string.Join("\n", aliveLines.ToArray()));
-        }
-        if (failureLines.Count > 0)
-        {
-            sections.Add("【启动失败】\n" + string.Join("\n\n", failureLines.ToArray()));
-        }
-        return string.Join("\n\n", sections.ToArray());
-    }
-
     async void ExecuteScreenshot(DeviceItem item, string displayTitle)
     {
         if (isBusy) return;
@@ -1435,7 +1331,7 @@ internal sealed class MainForm : Form
 
         try
         {
-            var conn = await runner.EnsureConnectedAsync(item, ct);
+            var conn = await adbClient.EnsureConnectedAsync(item, ct);
             if (!conn.ok)
             {
                 if (!IsDisposed && !Disposing)
@@ -1445,7 +1341,7 @@ internal sealed class MainForm : Form
                 return;
             }
 
-            var shot = await runner.CaptureScreenshotAsync(conn.activeSerial, ct);
+            var shot = await adbClient.CaptureScreenshotAsync(conn.activeSerial, ct);
             if (!shot.ok || shot.bitmap == null)
             {
                 if (!IsDisposed && !Disposing)
@@ -1456,7 +1352,7 @@ internal sealed class MainForm : Form
             }
             bmp = shot.bitmap;
 
-            ScanResult refreshed = wasPending ? await runner.ScanAsync(null, ct) : null;
+            ScanResult refreshed = wasPending ? await discoveryService.ScanAsync(null, ct) : null;
             if (IsDisposed || Disposing || !IsHandleCreated) return;
 
             int w = bmp.Width;
@@ -1530,7 +1426,7 @@ internal sealed class MainForm : Form
 
         try
         {
-            var conn = await runner.EnsureConnectedAsync(item, ct);
+            var conn = await adbClient.EnsureConnectedAsync(item, ct);
             if (!conn.ok)
             {
                 if (!IsDisposed && !Disposing)
@@ -1544,11 +1440,11 @@ internal sealed class MainForm : Form
             {
                 string launchedWith;
                 string err;
-                bool ok = runner.OpenDeviceTerminal(conn.activeSerial, displayTitle, mode, out launchedWith, out err);
+                bool ok = terminalLauncher.OpenDeviceTerminal(conn.activeSerial, displayTitle, mode, out launchedWith, out err);
                 return (ok, launchedWith, err);
             }, ct);
 
-            ScanResult refreshed = wasPending ? await runner.ScanAsync(null, ct) : null;
+            ScanResult refreshed = wasPending ? await discoveryService.ScanAsync(null, ct) : null;
             if (IsDisposed || Disposing) return;
             if (refreshed != null) ApplyScanResult(refreshed);
 

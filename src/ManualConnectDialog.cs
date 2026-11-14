@@ -12,7 +12,7 @@ internal sealed class ManualConnectDialog : Form
 
     readonly Label statusLabel;
     readonly Button connectButton;
-    readonly DeviceRunner runner;
+    readonly AdbClient adbClient;
     readonly CancellationTokenSource dialogCts = new CancellationTokenSource();
 
     bool suppressChangeTracking;
@@ -21,9 +21,9 @@ internal sealed class ManualConnectDialog : Form
     public bool Connected { get; private set; }
     public string ResultMessage { get; private set; }
 
-    public ManualConnectDialog(DeviceRunner runner)
+    public ManualConnectDialog(AdbClient adbClient)
     {
-        this.runner = runner;
+        this.adbClient = adbClient;
         Connected = false;
 
         Text = "手动连接设备";
@@ -299,7 +299,7 @@ internal sealed class ManualConnectDialog : Form
 
         try
         {
-            (bool ok, string msg) = await runner.ConnectEndpointAsync(ep, dialogCts.Token);
+            (bool ok, string msg) = await adbClient.ConnectEndpointAsync(ep, dialogCts.Token);
             if (IsDisposed || Disposing || dialogCts.IsCancellationRequested) return;
             if (ok)
             {

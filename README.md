@@ -86,11 +86,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\generate-icon.ps1 
 
 也可直接使用 `dotnet build .\WinScrcpy.csproj -c Release` 或 `dotnet publish .\WinScrcpy.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true`。
 
-### 内置自检与界面预览
+### 自动化测试
 
 ```powershell
-.\bin\Release\net10.0-windows\WinScrcpy.exe --selftest
-.\bin\Release\net10.0-windows\WinScrcpy.exe --preview .\preview-out
+# 构建后直接运行独立测试项目
+.\build.ps1 -Test
+
+# 或直接使用 dotnet test 运行
+dotnet test .\WinScrcpy.sln -c Release
 ```
 
 ## 目录结构
@@ -98,27 +101,34 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\generate-icon.ps1 
 ```text
 WinScrcpy/
 ├─ assets/
-│  ├─ app.ico                   # 应用程序图标
-│  └─ icon.png                  # README 展示图标
+│  ├─ app.ico                     # 应用程序图标
+│  └─ icon.png                    # README 展示图标
 ├─ scripts/
-│  └─ generate-icon.ps1         # 可选图标生成脚本
-├─ WinScrcpy.csproj             # .NET 10 WinForms 项目文件
-├─ build.ps1                    # dotnet build / dotnet publish 构建入口
-├─ winscrcpy.example.json       # 配置文件示例
-├─ LICENSE                      # MIT 开源协议
-└─ src/
-   ├─ Program.cs                # 程序入口、DPI 感知与命令行参数分发
-   ├─ Models.cs                 # 设备信息与通道状态定义
-   ├─ ConfigManager.cs          # JSON 配置解析、端点规范化校验与设备配置匹配
-   ├─ AdbScanner.cs             # adb devices 与 mDNS 服务解析归并
-   ├─ DeviceRunner.cs           # ADB 连接/配对、TCP 探活、scrcpy 与终端启动及截屏
-   ├─ QrEncoder.cs              # QR 码矩阵生成与位图渲染
-   ├─ UiTheme.cs                # DPI 缩放、窗口图标加载与自绘控件
-   ├─ MainForm.cs               # 主窗口界面与交互逻辑
-   ├─ PairDialog.cs             # 无线调试配对对话框（扫码 / 配对码）
-   ├─ ManualConnectDialog.cs    # 手动 IP:Port 直连对话框
-   ├─ SavedEndpointsDialog.cs   # 常用无线地址与别名管理对话框
-   └─ SelfTests.cs              # 内置单元测试与 UI 布局自检
+│  └─ generate-icon.ps1           # 可选图标生成脚本
+├─ WinScrcpy.sln                  # 解决方案（应用项目 + 测试项目）
+├─ WinScrcpy.csproj               # .NET 10 WinForms 应用项目文件
+├─ build.ps1                      # dotnet build / publish / test 入口
+├─ winscrcpy.example.json         # 配置文件示例
+├─ LICENSE                        # MIT 开源协议
+├─ src/
+│  ├─ Program.cs                  # 程序入口与异常边界
+│  ├─ Models.cs                   # 设备信息与通道状态定义
+│  ├─ ConfigManager.cs            # JSON 配置解析、端点规范化校验与设备配置匹配
+│  ├─ ProcessRunner.cs            # 外部工具路径解析与异步进程/流读取封装
+│  ├─ DetachedProcessLauncher.cs  # Win32 脱离进程启动与日志句柄监控
+│  ├─ AdbScanner.cs               # adb devices 与 mDNS 服务解析归并
+│  ├─ AdbClient.cs                # ADB 查询、连接、断开、配对与截屏
+│  ├─ DeviceDiscoveryService.cs   # 设备扫描编排、异步 TCP 探活与信息补全
+│  ├─ ScrcpyLauncher.cs           # scrcpy 参数构造、启动监控与批量投屏结果
+│  ├─ TerminalLauncher.cs         # Windows Terminal / PowerShell 启动与脚本构造
+│  ├─ QrEncoder.cs                # QR 码矩阵生成与位图渲染
+│  ├─ UiTheme.cs                  # DPI 缩放、窗口图标加载与自绘控件
+│  ├─ MainForm.cs                 # 主窗口界面与用户交互
+│  ├─ PairDialog.cs               # 无线调试配对对话框（扫码 / 配对码）
+│  ├─ ManualConnectDialog.cs      # 手动 IP:Port 直连对话框
+│  └─ SavedEndpointsDialog.cs     # 常用无线地址与别名管理对话框
+└─ tests/
+   └─ WinScrcpy.Tests/            # 独立 xUnit 测试项目（含 STA UI 与预览验证）
 ```
 
 ## 开源协议

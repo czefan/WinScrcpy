@@ -149,7 +149,7 @@ internal sealed class ConfigManager
         }
         string host;
         int port;
-        if (!DeviceRunner.TryParseEndpoint(trimmed, out host, out port)) return "";
+        if (!AdbClient.TryParseEndpoint(trimmed, out host, out port)) return "";
         return (host.IndexOf(':') >= 0 ? "[" + host + "]" : host) + ":" + port;
     }
 
@@ -159,7 +159,7 @@ internal sealed class ConfigManager
         if (string.IsNullOrEmpty(normalized)) return false;
         string host;
         int port;
-        if (!DeviceRunner.TryParseEndpoint(normalized, out host, out port)) return false;
+        if (!AdbClient.TryParseEndpoint(normalized, out host, out port)) return false;
         IPAddress parsedIp;
         if (char.IsDigit(host[0]) && !IPAddress.TryParse(host, out parsedIp)) return false;
         return true;

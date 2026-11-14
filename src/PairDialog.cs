@@ -29,7 +29,7 @@ internal sealed class PairDialog : Form
     readonly Label codeStatusLabel;
     readonly Button submitButton;
 
-    readonly DeviceRunner runner;
+    readonly AdbClient adbClient;
     readonly string discoveredPairingEndpoint;
     readonly System.Windows.Forms.Timer pollTimer;
     readonly CancellationTokenSource dialogCts = new CancellationTokenSource();
@@ -45,9 +45,9 @@ internal sealed class PairDialog : Form
     public bool Paired { get; private set; }
     public string ResultMessage { get; private set; }
 
-    public PairDialog(DeviceRunner runner, List<PairingServiceInfo> pairingServices)
+    public PairDialog(AdbClient adbClient, List<PairingServiceInfo> pairingServices)
     {
-        this.runner = runner;
+        this.adbClient = adbClient;
         this.discoveredPairingEndpoint = (pairingServices != null && pairingServices.Count > 0) ? pairingServices[0].Endpoint : "";
         Paired = false;
 
@@ -463,7 +463,7 @@ internal sealed class PairDialog : Form
 
     void UpdatePollTimerState()
     {
-        bool shouldPoll = Visible && pollingEnabled && isQrMode && !isPairing && runner != null;
+        bool shouldPoll = Visible && pollingEnabled && isQrMode && !isPairing && adbClient != null;
         if (shouldPoll && !pollTimer.Enabled)
         {
             pollTimer.Start();
@@ -503,7 +503,7 @@ internal sealed class PairDialog : Form
 
     async void OnPollTimerTick(object sender, EventArgs e)
     {
-        if (!pollingEnabled || !isQrMode || isPairing || pollInFlight || runner == null || dialogCts.IsCancellationRequested) return;
+        if (!pollingEnabled || !isQrMode || isPairing || pollInFlight || adbClient == null || dialogCts.IsCancellationRequested) return;
         pollInFlight = true;
 
         string targetService = qrServiceName;
@@ -511,7 +511,7 @@ internal sealed class PairDialog : Form
 
         try
         {
-            List<PairingServiceInfo> services = await runner.ListPairingServicesAsync(dialogCts.Token);
+            List<PairingServiceInfo> services = await adbClient.ListPairingServicesAsync(dialogCts.Token);
             if (IsDisposed || Disposing || dialogCts.IsCancellationRequested) return;
             if (!isQrMode || isPairing) return;
 
@@ -546,7 +546,7 @@ internal sealed class PairDialog : Form
 
         try
         {
-            (bool ok, string msg) = await runner.PairEndpointAsync(endpoint, password, dialogCts.Token);
+            (bool ok, string msg) = await adbClient.PairEndpointAsync(endpoint, password, dialogCts.Token);
             if (IsDisposed || Disposing || dialogCts.IsCancellationRequested) return;
             if (ok)
             {
@@ -608,7 +608,7 @@ internal sealed class PairDialog : Form
 
         try
         {
-            (bool ok, string msg) = await runner.PairEndpointAsync(ep, code, dialogCts.Token);
+            (bool ok, string msg) = await adbClient.PairEndpointAsync(ep, code, dialogCts.Token);
             if (IsDisposed || Disposing || dialogCts.IsCancellationRequested) return;
             if (ok)
             {

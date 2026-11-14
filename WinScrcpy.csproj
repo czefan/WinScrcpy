@@ -18,9 +18,13 @@
     <FileVersion>0.1.0.0</FileVersion>
     <InformationalVersion>0.1.0</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <DefaultItemExcludes>$(DefaultItemExcludes);tests\**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>WinScrcpy.Tests</_Parameter1>
+    </AssemblyAttribute>
     <EmbeddedResource Include="assets\app.ico" LogicalName="WinScrcpy.app.ico" />
   </ItemGroup>
 </Project>

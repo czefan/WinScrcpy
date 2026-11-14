@@ -3,12 +3,14 @@ param(
     [string]$Configuration = 'Release',
     [switch]$Publish,
     [switch]$SelfContained,
-    [switch]$RegenerateIcon
+    [switch]$RegenerateIcon,
+    [switch]$Test
 )
 
 $ErrorActionPreference = 'Stop'
 
 $projectPath = Join-Path $PSScriptRoot 'WinScrcpy.csproj'
+$testProjectPath = Join-Path $PSScriptRoot 'tests\WinScrcpy.Tests\WinScrcpy.Tests.csproj'
 $iconPath = Join-Path $PSScriptRoot 'assets\app.ico'
 $pngPath = Join-Path $PSScriptRoot 'assets\icon.png'
 $iconScript = Join-Path $PSScriptRoot 'scripts\generate-icon.ps1'
@@ -42,3 +44,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Output "Built: $outputExe"
+
+if ($Test) {
+    & dotnet test $testProjectPath -c $Configuration
+    if ($LASTEXITCODE -ne 0) {
+        throw 'dotnet test failed for WinScrcpy.Tests.'
+    }
+}
