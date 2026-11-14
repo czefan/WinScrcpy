@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Pipes;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -611,5 +612,118 @@ public sealed class ProcessAndScrcpyTests
             try { Directory.Delete(root, true); }
             catch (Exception) { }
         }
+    }
+
+    [Fact]
+    public async Task DetachedProcessLauncher_DoesNotInheritUnrelatedInheritablePipe()
+    {
+        string psExe = ToolPathResolver.FindExecutableInPath("powershell");
+        Assert.False(string.IsNullOrEmpty(psExe));
+
+        string root = Path.Combine(Path.GetTempPath(), "WinScrcpy 管道隔离 " + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        string scriptPath = Path.Combine(root, "child.ps1");
+        File.WriteAllText(scriptPath,
+            "[Console]::Out.WriteLine('INFO: Texture: 1080x2400')\r\n" +
+            "[Console]::Out.Flush()\r\n" +
+            "Start-Sleep -Seconds 5\r\n" +
+            "exit 0\r\n",
+            new UTF8Encoding(false));
+
+        int childPid = 0;
+        try
+        {
+            string pipeLog = Path.Combine(root, "pipe_leak_check.log");
+            using (AnonymousPipeServerStream pipeRead = new AnonymousPipeServerStream(PipeDirection.In, HandleInheritability.Inheritable))
+            {
+                ProcessStartInfo psi = ProcessRunner.BuildStartInfo(
+                    psExe,
+                    new string[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath },
+                    null, root, false, false);
+                DetachedMonitorResult r = DetachedProcessLauncher.LaunchWithLogAndMonitor(
+                    psi, pipeLog, 8000, ScrcpyLauncher.IsReadyLogLine);
+                childPid = r.ProcessId;
+                Assert.True(r.ProcessStarted && r.Status == DetachedMonitorStatus.MatchedReady && childPid > 0);
+                using (Process p = Process.GetProcessById(childPid))
+                {
+                    Assert.False(p.HasExited);
+                }
+
+                pipeRead.DisposeLocalCopyOfClientHandle();
+                byte[] probeBuf = new byte[1];
+                Task<int> readTask = pipeRead.ReadAsync(probeBuf, 0, 1);
+                Task completed = await Task.WhenAny(readTask, Task.Delay(1000));
+                Assert.Same(readTask, completed);
+                Assert.Equal(0, await readTask);
+                using (Process pAfter = Process.GetProcessById(childPid))
+                {
+                    Assert.False(pAfter.HasExited);
+                }
+            }
+        }
+        finally
+        {
+            ProcessTestHelpers.KillProcessSafe(childPid);
+            try { Directory.Delete(root, true); }
+            catch (Exception) { }
+        }
+    }
+
+    [Fact]
+    public async Task AdbClient_ConnectEndpointAsync_OnlyDisconnectsWhenOffline()
+    {
+        List<string> onlineCommands = new List<string>();
+        AdbClient onlineClient = new AdbClient(AppConfig.CreateDefault());
+        onlineClient.RunAdbOverrideForTest = (args, timeoutMs, ct) =>
+        {
+            string cmd = string.Join(" ", args);
+            onlineCommands.Add(cmd);
+            if (args.Count >= 1 && args[0] == "connect")
+            {
+                return Task.FromResult(new CommandOutput { ExitCode = 0, StdOut = "already connected to 127.0.0.1:5555\n" });
+            }
+            if (args.Count >= 1 && args[0] == "devices")
+            {
+                return Task.FromResult(new CommandOutput { ExitCode = 0, StdOut = "List of devices attached\n127.0.0.1:5555\tdevice product:p1 model:M1 transport_id:1\n" });
+            }
+            return Task.FromResult(new CommandOutput { ExitCode = 0, StdOut = "" });
+        };
+
+        (bool okOnline, string errOnline) = await onlineClient.ConnectEndpointAsync("127.0.0.1:5555");
+        Assert.True(okOnline && string.IsNullOrEmpty(errOnline));
+        Assert.Equal(new string[] { "connect 127.0.0.1:5555", "devices -l" }, onlineCommands.ToArray());
+
+        List<string> offlineCommands = new List<string>();
+        int connectAttempt = 0;
+        AdbClient offlineClient = new AdbClient(AppConfig.CreateDefault());
+        offlineClient.RunAdbOverrideForTest = (args, timeoutMs, ct) =>
+        {
+            string cmd = string.Join(" ", args);
+            offlineCommands.Add(cmd);
+            if (args.Count >= 1 && args[0] == "connect")
+            {
+                connectAttempt++;
+                return Task.FromResult(new CommandOutput
+                {
+                    ExitCode = 0,
+                    StdOut = connectAttempt == 1 ? "already connected to 127.0.0.1:5555\n" : "connected to 127.0.0.1:5555\n"
+                });
+            }
+            if (args.Count >= 1 && args[0] == "devices")
+            {
+                return Task.FromResult(new CommandOutput { ExitCode = 0, StdOut = "List of devices attached\n127.0.0.1:5555\toffline\n" });
+            }
+            if (args.Count >= 1 && args[0] == "disconnect")
+            {
+                return Task.FromResult(new CommandOutput { ExitCode = 0, StdOut = "disconnected 127.0.0.1:5555\n" });
+            }
+            return Task.FromResult(new CommandOutput { ExitCode = 0, StdOut = "" });
+        };
+
+        (bool okOffline, string errOffline) = await offlineClient.ConnectEndpointAsync("127.0.0.1:5555");
+        Assert.True(okOffline && string.IsNullOrEmpty(errOffline));
+        Assert.Equal(
+            new string[] { "connect 127.0.0.1:5555", "devices -l", "disconnect 127.0.0.1:5555", "connect 127.0.0.1:5555" },
+            offlineCommands.ToArray());
     }
 }

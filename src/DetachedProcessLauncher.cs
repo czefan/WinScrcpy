@@ -50,8 +50,11 @@ internal static class DetachedProcessLauncher
     const int STARTF_USESTDHANDLES = 0x00000100;
     const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
     const uint CREATE_NO_WINDOW = 0x08000000;
+    const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
     const uint WAIT_OBJECT_0 = 0x00000000;
+    const int ERROR_INSUFFICIENT_BUFFER = 122;
     const short SW_HIDE = 0;
+    static readonly IntPtr PROC_THREAD_ATTRIBUTE_HANDLE_LIST = (IntPtr)0x00020002;
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct STARTUPINFOW
@@ -77,6 +80,13 @@ internal static class DetachedProcessLauncher
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    struct STARTUPINFOEXW
+    {
+        public STARTUPINFOW StartupInfo;
+        public IntPtr lpAttributeList;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     struct PROCESS_INFORMATION
     {
         public IntPtr hProcess;
@@ -88,6 +98,26 @@ internal static class DetachedProcessLauncher
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool SetHandleInformation(SafeHandle hObject, uint dwMask, uint dwFlags);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool InitializeProcThreadAttributeList(
+        IntPtr lpAttributeList,
+        int dwAttributeCount,
+        int dwFlags,
+        ref IntPtr lpSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool UpdateProcThreadAttribute(
+        IntPtr lpAttributeList,
+        uint dwFlags,
+        IntPtr Attribute,
+        IntPtr lpValue,
+        IntPtr cbSize,
+        IntPtr lpPreviousValue,
+        IntPtr lpReturnSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern void DeleteProcThreadAttributeList(IntPtr lpAttributeList);
+
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool CreateProcessW(
         string lpApplicationName,
@@ -98,7 +128,7 @@ internal static class DetachedProcessLauncher
         uint dwCreationFlags,
         IntPtr lpEnvironment,
         string lpCurrentDirectory,
-        ref STARTUPINFOW lpStartupInfo,
+        ref STARTUPINFOEXW lpStartupInfo,
         out PROCESS_INFORMATION lpProcessInformation);
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -187,19 +217,57 @@ internal static class DetachedProcessLauncher
 
                     bool logRefAdded = false;
                     bool nulRefAdded = false;
-                    GCHandle envPin = GCHandle.Alloc(envBytes, GCHandleType.Pinned);
+                    bool attrInitialized = false;
+                    IntPtr attrList = IntPtr.Zero;
+                    GCHandle envPin = default(GCHandle);
+                    GCHandle handlesPin = default(GCHandle);
                     try
                     {
                         logWriteHandle.DangerousAddRef(ref logRefAdded);
                         nulReadHandle.DangerousAddRef(ref nulRefAdded);
 
-                        STARTUPINFOW si = new STARTUPINFOW();
-                        si.cb = Marshal.SizeOf(typeof(STARTUPINFOW));
-                        si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-                        si.wShowWindow = SW_HIDE;
-                        si.hStdInput = nulReadHandle.DangerousGetHandle();
-                        si.hStdOutput = logWriteHandle.DangerousGetHandle();
-                        si.hStdError = logWriteHandle.DangerousGetHandle();
+                        IntPtr logHandle = logWriteHandle.DangerousGetHandle();
+                        IntPtr nulHandle = nulReadHandle.DangerousGetHandle();
+                        IntPtr[] inheritHandles = new IntPtr[] { nulHandle, logHandle };
+
+                        IntPtr attrSize = IntPtr.Zero;
+                        InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attrSize);
+                        int initErr = Marshal.GetLastWin32Error();
+                        if (attrSize == IntPtr.Zero || (initErr != 0 && initErr != ERROR_INSUFFICIENT_BUFFER))
+                        {
+                            throw new Win32Exception(initErr, "获取进程属性列表大小失败");
+                        }
+
+                        attrList = Marshal.AllocHGlobal(attrSize);
+                        if (!InitializeProcThreadAttributeList(attrList, 1, 0, ref attrSize))
+                        {
+                            throw new Win32Exception(Marshal.GetLastWin32Error(), "初始化进程属性列表失败");
+                        }
+                        attrInitialized = true;
+
+                        handlesPin = GCHandle.Alloc(inheritHandles, GCHandleType.Pinned);
+                        if (!UpdateProcThreadAttribute(
+                            attrList,
+                            0,
+                            PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                            handlesPin.AddrOfPinnedObject(),
+                            (IntPtr)(inheritHandles.Length * IntPtr.Size),
+                            IntPtr.Zero,
+                            IntPtr.Zero))
+                        {
+                            throw new Win32Exception(Marshal.GetLastWin32Error(), "设置进程可继承句柄白名单失败");
+                        }
+
+                        envPin = GCHandle.Alloc(envBytes, GCHandleType.Pinned);
+
+                        STARTUPINFOEXW siEx = new STARTUPINFOEXW();
+                        siEx.StartupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFOEXW));
+                        siEx.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+                        siEx.StartupInfo.wShowWindow = SW_HIDE;
+                        siEx.StartupInfo.hStdInput = nulHandle;
+                        siEx.StartupInfo.hStdOutput = logHandle;
+                        siEx.StartupInfo.hStdError = logHandle;
+                        siEx.lpAttributeList = attrList;
 
                         PROCESS_INFORMATION pi;
                         bool created = CreateProcessW(
@@ -208,10 +276,10 @@ internal static class DetachedProcessLauncher
                             IntPtr.Zero,
                             IntPtr.Zero,
                             true,
-                            CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+                            CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
                             envPin.AddrOfPinnedObject(),
                             workDir,
-                            ref si,
+                            ref siEx,
                             out pi);
 
                         if (!created)
@@ -226,6 +294,9 @@ internal static class DetachedProcessLauncher
                     }
                     finally
                     {
+                        if (attrInitialized) DeleteProcThreadAttributeList(attrList);
+                        if (attrList != IntPtr.Zero) Marshal.FreeHGlobal(attrList);
+                        if (handlesPin.IsAllocated) handlesPin.Free();
                         if (logRefAdded) logWriteHandle.DangerousRelease();
                         if (nulRefAdded) nulReadHandle.DangerousRelease();
                         if (envPin.IsAllocated) envPin.Free();

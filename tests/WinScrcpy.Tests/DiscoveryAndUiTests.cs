@@ -651,4 +651,102 @@ public sealed class DiscoveryAndUiTests
             }
         });
     }
+
+    [Fact]
+    public void MainForm_AllowsOperatingOnlineDeviceDuringStage2ScanAndCancelsScan()
+    {
+        StaRunner.Run(() =>
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "winscrcpy_stage2_act_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            string cfgPath = Path.Combine(tempDir, "winscrcpy.json");
+            AppConfig cfg = AppConfig.CreateDefault();
+            cfg.adbPath = Path.Combine(tempDir, "missing_adb.exe");
+            ConfigManager mgr = new ConfigManager(cfgPath);
+            mgr.Save(cfg);
+
+            try
+            {
+                using (MainForm form = new MainForm(mgr, cfg, null, false))
+                {
+                    UiTestHelpers.ShowOffscreen(form);
+
+                    bool scanCanceled = false;
+                    TaskCompletionSource<ScanResult> stage2Gate = new TaskCompletionSource<ScanResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    ScanResult stage1Usb = AdbScanner.ParseAndMerge(
+                        "List of devices attached\nUSB_EARLY_01 device product:p1 model:EarlyPhone transport_id:1\n",
+                        "");
+
+                    Task scanTask = form.ExecuteScanCoreAsync(async (onStage1, ct) =>
+                    {
+                        ct.Register(() => scanCanceled = true);
+                        await Task.Run(() => onStage1(stage1Usb)).ConfigureAwait(false);
+                        return await stage2Gate.Task.ConfigureAwait(false);
+                    });
+
+                    Assert.True(UiTestHelpers.PumpUntil(
+                        () => form.RowCountForTest == 1 && form.StatusTextForTest.Contains("正在探测无线设备"),
+                        2500));
+
+                    Button mirrorBtn = FindDescendantButton(form, "投屏");
+                    Button shotBtn = FindDescendantButton(form, "截屏");
+                    Button pairBtn = FindDescendantButton(form, "无线配对…");
+                    Button manualBtn = FindDescendantButton(form, "手动连接…");
+                    Button moreBtn = FindDescendantButton(form, "更多 ▾");
+                    ModernCheckBox selectAll = FindDescendantCheckBox(form, null);
+                    ModernCheckBox rowCheck = FindDescendantCheckBox(form, selectAll);
+
+                    Assert.True(mirrorBtn != null && mirrorBtn.Enabled);
+                    Assert.True(shotBtn != null && shotBtn.Enabled);
+                    Assert.True(pairBtn != null && pairBtn.Enabled);
+                    Assert.True(manualBtn != null && manualBtn.Enabled);
+                    Assert.True(moreBtn != null && moreBtn.Enabled);
+                    Assert.True(selectAll != null && selectAll.Enabled);
+                    Assert.True(rowCheck != null && rowCheck.Enabled);
+
+                    rowCheck.Checked = true;
+                    Assert.True(form.ConnectSelectedButton.Visible && form.ConnectSelectedButton.Enabled);
+
+                    shotBtn.PerformClick();
+
+                    Assert.True(UiTestHelpers.PumpUntil(() => scanCanceled, 1000), "操作开始后应立即取消进行中的扫描");
+                    Assert.True(UiTestHelpers.PumpUntil(() => !form.IsBusyState && form.StatusTextForTest.Contains("截屏失败"), 2500),
+                        "已上线设备操作应立即完成而无需等待慢速无线探测结束");
+
+                    stage2Gate.TrySetCanceled();
+                    Assert.True(UiTestHelpers.PumpUntil(() => scanTask.IsCompleted, 1000));
+                    form.Close();
+                }
+            }
+            finally
+            {
+                try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); }
+                catch { }
+            }
+        });
+    }
+
+    static Button FindDescendantButton(Control root, string text)
+    {
+        foreach (Control c in root.Controls)
+        {
+            Button btn = c as Button;
+            if (btn != null && string.Equals(btn.Text, text, StringComparison.Ordinal)) return btn;
+            Button nested = FindDescendantButton(c, text);
+            if (nested != null) return nested;
+        }
+        return null;
+    }
+
+    static ModernCheckBox FindDescendantCheckBox(Control root, ModernCheckBox exclude)
+    {
+        foreach (Control c in root.Controls)
+        {
+            ModernCheckBox cb = c as ModernCheckBox;
+            if (cb != null && !ReferenceEquals(cb, exclude)) return cb;
+            ModernCheckBox nested = FindDescendantCheckBox(c, exclude);
+            if (nested != null) return nested;
+        }
+        return null;
+    }
 }

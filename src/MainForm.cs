@@ -336,7 +336,7 @@ internal sealed class MainForm : Form
 
     void OnMoreButtonClick(object sender, EventArgs e)
     {
-        if (isBusy) return;
+        if (isActionBusy) return;
         Point pt = new Point(moreBtn.Width - moreMenu.PreferredSize.Width, moreBtn.Height + moreBtn.LogicalToDeviceUnits(4));
         if (pt.X < -moreBtn.Left) pt.X = 0;
         moreMenu.Show(moreBtn, pt);
@@ -346,19 +346,19 @@ internal sealed class MainForm : Form
     {
         isActionBusy = actionBusy;
         isScanning = scanning;
-        bool blocksActions = actionBusy || scanning;
+        // 扫描探测无线设备期间允许立即操作已发现的在线设备，仅在执行显式操作期间禁用交互。
         refreshBtn.Enabled = !actionBusy;
         refreshBtn.Text = scanning ? "扫描中…" : "扫描 (F5)";
-        pairBtn.Enabled = !blocksActions;
-        manualBtn.Enabled = !blocksActions;
-        moreBtn.Enabled = !blocksActions;
-        manageSavedItem.Enabled = !blocksActions;
-        disconnectAllItem.Enabled = !blocksActions;
-        restartAdbItem.Enabled = !blocksActions;
-        connectSelectedBtn.Enabled = !blocksActions;
+        pairBtn.Enabled = !actionBusy;
+        manualBtn.Enabled = !actionBusy;
+        moreBtn.Enabled = !actionBusy;
+        manageSavedItem.Enabled = !actionBusy;
+        disconnectAllItem.Enabled = !actionBusy;
+        restartAdbItem.Enabled = !actionBusy;
+        connectSelectedBtn.Enabled = !actionBusy;
         if (selectAllCheck != null)
         {
-            selectAllCheck.Enabled = !blocksActions && HasAnyConnectableRow();
+            selectAllCheck.Enabled = !actionBusy && HasAnyConnectableRow();
         }
         if (status != null) statusLabel.Text = status;
         if (dotColor.HasValue)
@@ -586,7 +586,7 @@ internal sealed class MainForm : Form
 
     async void RunGlobalAdbAction(string statusText, Func<CancellationToken, Task<string>> work)
     {
-        if (isBusy) return;
+        if (isActionBusy) return;
         InvalidateActiveScan();
         SetUiBusy(true, false, statusText, UiTheme.AccentBlue);
         CancellationToken ct = formCts.Token;
@@ -632,7 +632,7 @@ internal sealed class MainForm : Form
 
     void OnOpenPairDialog(object sender, EventArgs e)
     {
-        if (isBusy) return;
+        if (isActionBusy) return;
         using (PairDialog dlg = new PairDialog(adbClient, lastPairingServices))
         {
             if (UiTheme.ShowDialogCentered(this, dlg) == DialogResult.OK && dlg.Paired)
@@ -644,7 +644,7 @@ internal sealed class MainForm : Form
 
     void OnOpenManualConnectDialog(object sender, EventArgs e)
     {
-        if (isBusy) return;
+        if (isActionBusy) return;
         using (ManualConnectDialog dlg = new ManualConnectDialog(adbClient))
         {
             if (UiTheme.ShowDialogCentered(this, dlg) == DialogResult.OK && dlg.Connected)
@@ -656,7 +656,7 @@ internal sealed class MainForm : Form
 
     void OnOpenManageSavedDialog(object sender, EventArgs e)
     {
-        if (isBusy) return;
+        if (isActionBusy) return;
         using (SavedEndpointsDialog dlg = new SavedEndpointsDialog(configManager, config))
         {
             if (UiTheme.ShowDialogCentered(this, dlg) == DialogResult.OK && dlg.Saved)
@@ -969,7 +969,7 @@ internal sealed class MainForm : Form
         termMenu.BackColor = Color.White;
         termMenu.Opening += delegate(object s, System.ComponentModel.CancelEventArgs ce)
         {
-            if (isBusy) ce.Cancel = true;
+            if (isActionBusy) ce.Cancel = true;
         };
 
         DeviceItem capturedForTerm = item;
@@ -1227,7 +1227,7 @@ internal sealed class MainForm : Form
         if (selectAllCheck != null)
         {
             syncingCheckBoxes = true;
-            selectAllCheck.Enabled = !isBusy && anyConnectable;
+            selectAllCheck.Enabled = !isActionBusy && anyConnectable;
             selectAllCheck.Checked = allChecked;
             syncingCheckBoxes = false;
         }
@@ -1278,7 +1278,7 @@ internal sealed class MainForm : Form
 
     async void ExecuteWirelessAction(DeviceItem item, string displayTitle, bool isDisconnecting)
     {
-        if (isBusy) return;
+        if (isActionBusy) return;
         InvalidateActiveScan();
         SetUiBusy(true, false, (isDisconnecting ? "正在断开 [" : "正在连接 [") + displayTitle + "] 无线 ADB…", UiTheme.AccentBlue);
         CancellationToken ct = formCts.Token;
@@ -1330,7 +1330,7 @@ internal sealed class MainForm : Form
 
     async void ExecuteConnectBatch(List<DeviceItem> targets)
     {
-        if (isBusy) return;
+        if (isActionBusy) return;
         InvalidateActiveScan();
         SetUiBusy(true, false, string.Format("正在连接并启动投屏 ({0} 台设备)…", targets.Count), UiTheme.AccentBlue);
         CancellationToken ct = formCts.Token;
@@ -1384,7 +1384,7 @@ internal sealed class MainForm : Form
 
     async void ExecuteScreenshot(DeviceItem item, string displayTitle)
     {
-        if (isBusy) return;
+        if (isActionBusy) return;
         InvalidateActiveScan();
         bool wasPending = IsPendingWireless(item.Channel);
         SetUiBusy(true, false, "正在截取 [" + displayTitle + "] 屏幕…", UiTheme.AccentBlue);
@@ -1479,7 +1479,7 @@ internal sealed class MainForm : Form
 
     async void ExecuteOpenTerminal(DeviceItem item, string displayTitle, TerminalMode mode)
     {
-        if (isBusy || !item.CanConnect) return;
+        if (isActionBusy || !item.CanConnect) return;
         InvalidateActiveScan();
         bool wasPending = IsPendingWireless(item.Channel);
         string modeName = mode == TerminalMode.AdbShell ? "ADB Shell" : "本地 ADB 终端";

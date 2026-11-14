@@ -16,6 +16,7 @@ internal interface IAdbClient
 internal sealed class AdbClient : IAdbClient
 {
     readonly AppConfig config;
+    internal Func<IList<string>, int, CancellationToken, Task<CommandOutput>> RunAdbOverrideForTest;
 
     public AdbClient(AppConfig config)
     {
@@ -29,6 +30,11 @@ internal sealed class AdbClient : IAdbClient
 
     public Task<CommandOutput> RunAdbAsync(IList<string> args, int timeoutMs, CancellationToken cancellationToken = default)
     {
+        if (RunAdbOverrideForTest != null)
+        {
+            return RunAdbOverrideForTest(args, timeoutMs, cancellationToken);
+        }
+
         ToolResolutionResult adbRes = ResolveAdbPath();
         if (!adbRes.Success)
         {
@@ -124,12 +130,16 @@ internal sealed class AdbClient : IAdbClient
         (bool rawOk, string msg, string error) = await RunAdbConnectRawAsync(endpoint, cancellationToken).ConfigureAwait(false);
         if (!rawOk) return (false, error);
 
-        // 若 adb 仍持有失效的 "offline" 句柄，adb connect 会直接返回 "already connected to" 而不重连；先断开再重连一次。
+        // 仅当 adb devices 确认该端点确实处于 offline 状态时才断开重连，避免打断正常在线会话。
         if (msg.IndexOf("already connected to", StringComparison.OrdinalIgnoreCase) >= 0)
         {
-            await RunSingleDisconnectAsync(endpoint, cancellationToken).ConfigureAwait(false);
-            (rawOk, msg, error) = await RunAdbConnectRawAsync(endpoint, cancellationToken).ConfigureAwait(false);
-            if (!rawOk) return (false, error);
+            string offlineHandle = await FindOfflineHandleAsync(endpoint, msg, cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(offlineHandle))
+            {
+                await RunSingleDisconnectAsync(offlineHandle, cancellationToken).ConfigureAwait(false);
+                (rawOk, msg, error) = await RunAdbConnectRawAsync(endpoint, cancellationToken).ConfigureAwait(false);
+                if (!rawOk) return (false, error);
+            }
         }
 
         if (msg.IndexOf("connected to", StringComparison.OrdinalIgnoreCase) >= 0
@@ -151,6 +161,39 @@ internal sealed class AdbClient : IAdbClient
             return (false, "", outp.GetFailureSummary("adb connect 失败", "连接超时", "连接已取消"));
         }
         return (true, outp.CombinedOutput, "");
+    }
+
+    async Task<string> FindOfflineHandleAsync(string endpoint, string connectMsg, CancellationToken cancellationToken)
+    {
+        CommandOutput devicesOut = await QueryDevicesRawAsync(cancellationToken).ConfigureAwait(false);
+        if (devicesOut == null || !devicesOut.Success) return "";
+
+        string reportedTarget = ExtractAlreadyConnectedTarget(connectMsg);
+        List<DeviceItem> items = AdbScanner.ParseDevices(devicesOut.StdOut);
+        for (int i = 0; i < items.Count; i++)
+        {
+            DeviceItem item = items[i];
+            if (item.Channel != ChannelKind.Offline) continue;
+            if (string.Equals(item.AdbSerial, endpoint, StringComparison.OrdinalIgnoreCase)
+                || (!string.IsNullOrEmpty(reportedTarget)
+                    && string.Equals(item.AdbSerial, reportedTarget, StringComparison.OrdinalIgnoreCase)))
+            {
+                return item.AdbSerial;
+            }
+        }
+        return "";
+    }
+
+    static string ExtractAlreadyConnectedTarget(string msg)
+    {
+        if (string.IsNullOrWhiteSpace(msg)) return "";
+        const string marker = "already connected to ";
+        int idx = msg.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (idx < 0) return "";
+
+        string rest = msg.Substring(idx + marker.Length).Trim();
+        int end = rest.IndexOfAny(new char[] { '\r', '\n', ' ', '\t' });
+        return end > 0 ? rest.Substring(0, end) : rest;
     }
 
     public async Task<(bool ok, string error)> DisconnectDeviceAsync(DeviceItem item, CancellationToken cancellationToken = default)

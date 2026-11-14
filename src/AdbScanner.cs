@@ -336,7 +336,7 @@ internal static class AdbScanner
         result.Devices = kept;
     }
 
-    static List<DeviceItem> ParseDevices(string output)
+    public static List<DeviceItem> ParseDevices(string output)
     {
         List<DeviceItem> items = new List<DeviceItem>();
         if (string.IsNullOrWhiteSpace(output)) return items;
