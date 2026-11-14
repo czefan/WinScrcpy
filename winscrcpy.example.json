@@ -1,0 +1,22 @@
+{
+  "adbPath": "adb",
+  "scrcpyPath": "scrcpy",
+  "globalArgs": [
+    "--stay-awake"
+  ],
+  "savedEndpoints": [
+    "192.168.1.50:5555"
+  ],
+  "devices": {
+    "0123456789ABCDEF": {
+      "alias": "主力机",
+      "args": []
+    },
+    "192.168.1.50:5555": {
+      "alias": "平板",
+      "args": [
+        "--max-size=1600"
+      ]
+    }
+  }
+}

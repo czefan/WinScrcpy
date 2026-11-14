@@ -1,0 +1,21 @@
+# User-local runtime config (may contain device serials or LAN IPs)
+winscrcpy.json
+
+# Build outputs and debug symbols
+WinScrcpy.exe
+*.pdb
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+
+# IDE and editor directories
+.vs/
+.vscode/
+.idea/
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
