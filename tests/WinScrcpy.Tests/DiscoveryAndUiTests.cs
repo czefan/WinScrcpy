@@ -594,4 +594,38 @@ public sealed class DiscoveryAndUiTests
             }
         });
     }
+
+    [Fact]
+    public void SavedEndpointsDialog_RefusesOverwriteWhenConfigCorrupted()
+    {
+        StaRunner.Run(() =>
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "winscrcpy_dlg_corrupt_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            string cfgPath = Path.Combine(tempDir, "winscrcpy.json");
+            string brokenJson = "{ broken";
+            try
+            {
+                File.WriteAllText(cfgPath, brokenJson);
+                ConfigManager mgr = new ConfigManager(cfgPath);
+                AppConfig fallback = mgr.LoadOrCreate(out string warn);
+                Assert.True(mgr.IsConfigCorrupted && !string.IsNullOrEmpty(warn));
+
+                using (SavedEndpointsDialog dlg = new SavedEndpointsDialog(mgr, fallback))
+                {
+                    UiTestHelpers.ShowOffscreen(dlg);
+                    dlg.grid.Rows.Add("192.168.3.50", "客厅");
+                    Assert.False(dlg.TrySaveFromGrid());
+                    Assert.False(dlg.Saved);
+                    Assert.Equal(brokenJson, File.ReadAllText(cfgPath));
+                    dlg.Close();
+                }
+            }
+            finally
+            {
+                try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); }
+                catch { }
+            }
+        });
+    }
 }
