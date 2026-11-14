@@ -456,6 +456,56 @@ internal class RoundedPanel : TableLayoutPanel
 
 internal sealed class ModernTextBoxHost : RoundedPanel
 {
+    sealed class HostTextBox : TextBox
+    {
+        public HostTextBox()
+        {
+            BorderStyle = BorderStyle.None;
+            AutoSize = false;
+            Margin = new Padding(0);
+            ForeColor = UiTheme.TextPrimary;
+            BackColor = Color.White;
+            Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            Width = 1;
+        }
+
+        int MeasureHeight()
+        {
+            Font f = Font ?? UiTheme.BodyFont;
+            int textHeight;
+            if (IsHandleCreated)
+            {
+                using (Graphics g = CreateGraphics())
+                    textHeight = TextRenderer.MeasureText(g, "测gy", f).Height;
+            }
+            else
+            {
+                textHeight = TextRenderer.MeasureText("测gy", f).Height;
+            }
+            return Math.Max(PreferredHeight, textHeight + 2);
+        }
+
+        void SyncHeight()
+        {
+            int h = MeasureHeight();
+            if (Height != h) Height = h;
+        }
+
+        public override Size GetPreferredSize(Size proposedSize) => new Size(1, MeasureHeight());
+
+        protected override void ScaleControl(SizeF factor, BoundsSpecified specified)
+        {
+            base.ScaleControl(factor, specified);
+            // 高度按当前 DPI 字体重算，宽度交由宿主列宽控制，避免 AutoScaleMode.Dpi 二次放大。
+            Width = 1;
+            SyncHeight();
+        }
+
+        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); SyncHeight(); }
+        protected override void OnFontChanged(EventArgs e) { base.OnFontChanged(e); SyncHeight(); }
+        protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); SyncHeight(); }
+    }
+
     public readonly TextBox InnerBox;
     readonly string placeholder;
 
@@ -466,6 +516,7 @@ internal sealed class ModernTextBoxHost : RoundedPanel
         BorderLineColor = UiTheme.InputBorder;
         CardBg = Color.White;
         BackColor = Color.White;
+        Font = UiTheme.BodyFont;
         ColumnCount = 1;
         RowCount = 1;
         ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
@@ -474,67 +525,23 @@ internal sealed class ModernTextBoxHost : RoundedPanel
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
 
-        InnerBox = new TextBox();
-        InnerBox.BorderStyle = BorderStyle.None;
-        InnerBox.AutoSize = false;
-        InnerBox.Font = UiTheme.BodyFont;
-        InnerBox.ForeColor = UiTheme.TextPrimary;
-        InnerBox.BackColor = Color.White;
-        InnerBox.Anchor = AnchorStyles.Left | AnchorStyles.Right;
-        InnerBox.Margin = new Padding(0);
-        UpdateInputHeight();
-
+        InnerBox = new HostTextBox();
         if (this.placeholder.Length > 0)
         {
-            InnerBox.HandleCreated += delegate
-            {
-                UiTheme.SetCueBanner(InnerBox, this.placeholder);
-            };
+            InnerBox.HandleCreated += delegate { UiTheme.SetCueBanner(InnerBox, this.placeholder); };
         }
-        InnerBox.GotFocus += delegate
-        {
-            if (BorderLineColor != UiTheme.AccentBlue)
-            {
-                BorderLineColor = UiTheme.AccentBlue;
-                Invalidate();
-            }
-        };
-        InnerBox.LostFocus += delegate
-        {
-            if (BorderLineColor != UiTheme.InputBorder)
-            {
-                BorderLineColor = UiTheme.InputBorder;
-                Invalidate();
-            }
-        };
+        InnerBox.GotFocus += delegate { SetBorderColor(UiTheme.AccentBlue); };
+        InnerBox.LostFocus += delegate { SetBorderColor(UiTheme.InputBorder); };
 
         Controls.Add(InnerBox, 0, 0);
         Click += delegate { InnerBox.Focus(); };
     }
 
-    protected override void OnFontChanged(EventArgs e)
+    void SetBorderColor(Color color)
     {
-        base.OnFontChanged(e);
-        if (InnerBox != null)
-        {
-            InnerBox.Font = Font;
-            UpdateInputHeight();
-        }
-    }
-
-    protected override void OnDpiChangedAfterParent(EventArgs e)
-    {
-        base.OnDpiChangedAfterParent(e);
-        UpdateInputHeight();
-    }
-
-    void UpdateInputHeight()
-    {
-        if (InnerBox == null) return;
-        Font activeFont = InnerBox.Font ?? UiTheme.BodyFont;
-        int boxHeight = Math.Max(InnerBox.PreferredSize.Height, TextRenderer.MeasureText("测gy", activeFont).Height + 2);
-        InnerBox.Height = boxHeight;
-        InnerBox.MinimumSize = new Size(0, boxHeight);
+        if (BorderLineColor == color) return;
+        BorderLineColor = color;
+        Invalidate();
     }
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]

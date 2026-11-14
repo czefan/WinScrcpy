@@ -596,6 +596,29 @@ public sealed class DiscoveryAndUiTests
     }
 
     [Fact]
+    public void ManualConnectDialog_ModernTextBoxHostDoesNotDoubleScaleOnDpi()
+    {
+        StaRunner.Run(() =>
+        {
+            AppConfig cfg = AppConfig.CreateDefault();
+            using (ManualConnectDialog connect = new ManualConnectDialog(new AdbClient(cfg)))
+            {
+                UiTestHelpers.ShowOffscreen(connect);
+                using (Graphics g = connect.fullEndpointHost.InnerBox.CreateGraphics())
+                {
+                    int expectedSingleLine = Math.Max(
+                        connect.fullEndpointHost.InnerBox.PreferredHeight,
+                        TextRenderer.MeasureText(g, "测gy", connect.fullEndpointHost.InnerBox.Font).Height + 2);
+                    Assert.Equal(expectedSingleLine, connect.fullEndpointHost.InnerBox.Height);
+                }
+                Assert.True(connect.subnetHost.Width <= connect.LogicalToDeviceUnits(64));
+                Assert.True(connect.portHost.Width <= connect.LogicalToDeviceUnits(84));
+                connect.Close();
+            }
+        });
+    }
+
+    [Fact]
     public void SavedEndpointsDialog_RefusesOverwriteWhenConfigCorrupted()
     {
         StaRunner.Run(() =>
