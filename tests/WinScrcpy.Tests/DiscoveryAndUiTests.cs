@@ -726,6 +726,203 @@ public sealed class DiscoveryAndUiTests
         });
     }
 
+    [Fact]
+    public void MainForm_SkipsControlRebuildWhenScanSnapshotMatches()
+    {
+        StaRunner.Run(() =>
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "winscrcpy_skip_rebuild_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            string cfgPath = Path.Combine(tempDir, "winscrcpy.json");
+            try
+            {
+                AppConfig cfg = AppConfig.CreateDefault();
+                ConfigManager mgr = new ConfigManager(cfgPath);
+                mgr.Save(cfg);
+
+                using (MainForm form = new MainForm(mgr, cfg, null, false))
+                {
+                    UiTestHelpers.ShowOffscreen(form);
+
+                    // 1. Empty -> Empty skips duplicate rebuild.
+                    form.LoadScanResultForTest(new ScanResult());
+                    Application.DoEvents();
+                    int afterFirstEmpty = form.RebuildCountForTest;
+                    form.LoadScanResultForTest(new ScanResult());
+                    Application.DoEvents();
+                    Assert.Equal(afterFirstEmpty, form.RebuildCountForTest);
+
+                    // 2. Identical scan result preserves ActiveTableCard, checkbox state, and skips rebuild.
+                    ScanResult firstScan = UiTestHelpers.BuildMockScanResult();
+                    form.LoadScanResultForTest(firstScan);
+                    Application.DoEvents();
+                    int afterFirstDevices = form.RebuildCountForTest;
+                    Assert.True(afterFirstDevices > afterFirstEmpty);
+                    Control initialCard = form.ActiveTableCard;
+                    form.SelectAllCheckBox.Checked = true;
+                    Application.DoEvents();
+                    Assert.True(form.ConnectSelectedButton.Visible);
+
+                    ScanResult sameDevicesClone = UiTestHelpers.BuildMockScanResult();
+                    form.LoadScanResultForTest(sameDevicesClone);
+                    Application.DoEvents();
+                    Assert.Equal(afterFirstDevices, form.RebuildCountForTest);
+                    Assert.Same(initialCard, form.ActiveTableCard);
+                    Assert.True(form.ConnectSelectedButton.Visible && form.SelectAllCheckBox.Checked);
+
+                    // 3. Single scan with identical Stage1 and Final devices triggers only 1 rebuild.
+                    int beforeTwoStage = form.RebuildCountForTest;
+                    ScanResult stage1Scan = AdbScanner.ParseAndMerge("List of devices attached\nNEWUSB01\tdevice model:Pixel_10\n", "");
+                    ScanResult finalScan = AdbScanner.ParseAndMerge("List of devices attached\nNEWUSB01\tdevice model:Pixel_10\n", "");
+                    Task scanTask = form.ExecuteScanCoreAsync((onStage1, ct) =>
+                    {
+                        onStage1(stage1Scan);
+                        return Task.FromResult(finalScan);
+                    });
+                    Assert.True(UiTestHelpers.PumpUntil(() => scanTask.IsCompleted && !form.IsBusyState, 3000));
+                    scanTask.GetAwaiter().GetResult();
+                    Assert.Equal(beforeTwoStage + 1, form.RebuildCountForTest);
+
+                    // 4. Config alias change updates snapshot and forces rebuild on next scan.
+                    AppConfig updatedCfg = AppConfig.CreateDefault();
+                    ConfigManager.SetDeviceAlias(updatedCfg, "NEWUSB01", "主力新机");
+                    mgr.Save(updatedCfg);
+                    int beforeAliasRebuild = form.RebuildCountForTest;
+                    ScanResult postAliasScan = AdbScanner.ParseAndMerge("List of devices attached\nNEWUSB01\tdevice model:Pixel_10\n", "");
+                    Task aliasScanTask = form.ExecuteScanCoreAsync((onStage1, ct) => Task.FromResult(postAliasScan));
+                    Assert.True(UiTestHelpers.PumpUntil(() => aliasScanTask.IsCompleted && !form.IsBusyState, 3000));
+                    aliasScanTask.GetAwaiter().GetResult();
+                    Assert.Equal(beforeAliasRebuild + 1, form.RebuildCountForTest);
+
+                    form.Close();
+                }
+            }
+            finally
+            {
+                try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); }
+                catch { }
+            }
+        });
+    }
+
+    [Fact]
+    public void MainForm_PreservesSelectionAcrossEquivalentRefreshAndForcedRebuild()
+    {
+        StaRunner.Run(() =>
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "winscrcpy_keep_sel_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            string cfgPath = Path.Combine(tempDir, "winscrcpy.json");
+            try
+            {
+                AppConfig cfg = AppConfig.CreateDefault();
+                ConfigManager mgr = new ConfigManager(cfgPath);
+                mgr.Save(cfg);
+
+                Func<ScanResult> createDualChannelScan = () =>
+                {
+                    string devices = "List of devices attached\n9A8B7C6D5E4F3G2H\tdevice model:Pixel_9\n";
+                    string mdns = string.Join("\n", new string[]
+                    {
+                        "List of discovered mdns services",
+                        "adb-9A8B7C6D5E4F3G2H-YzPHtO (2)\t_adb-tls-connect._tcp\t192.168.3.8:38081"
+                    });
+                    return AdbScanner.ParseAndMerge(devices, mdns);
+                };
+
+                using (MainForm form = new MainForm(mgr, cfg, null, false))
+                {
+                    UiTestHelpers.ShowOffscreen(form);
+
+                    form.LoadScanResultForTest(createDualChannelScan());
+                    Application.DoEvents();
+                    int afterInitial = form.RebuildCountForTest;
+                    Control initialCard = form.ActiveTableCard;
+
+                    List<ModernCheckBox> initialChecks = CollectRowCheckBoxes(form.ActiveTableCard, form.SelectAllCheckBox);
+                    Assert.Equal(2, initialChecks.Count);
+                    Assert.Equal(ChannelKind.Usb, ((DeviceItem)initialChecks[0].Tag).Channel);
+                    Assert.Equal(ChannelKind.MdnsPending, ((DeviceItem)initialChecks[1].Tag).Channel);
+
+                    // Select only the USB channel of the device, leaving the wireless channel unchecked.
+                    initialChecks[0].Checked = true;
+                    Application.DoEvents();
+                    Assert.True(form.ConnectSelectedButton.Visible);
+                    Assert.False(form.SelectAllCheckBox.Checked);
+
+                    // Equivalent scan replaces lastScanResult with new DeviceItem instances while reusing existing controls.
+                    form.LoadScanResultForTest(createDualChannelScan());
+                    Application.DoEvents();
+                    Assert.Equal(afterInitial, form.RebuildCountForTest);
+                    Assert.Same(initialCard, form.ActiveTableCard);
+                    Assert.True(initialChecks[0].Checked);
+                    Assert.False(initialChecks[1].Checked);
+
+                    // Forced rebuild (e.g., DPI change) must restore selection by stable device/channel identity.
+                    form.RebuildDeviceListPreservingSelection();
+                    Application.DoEvents();
+                    Assert.Equal(afterInitial + 1, form.RebuildCountForTest);
+                    Assert.NotSame(initialCard, form.ActiveTableCard);
+
+                    List<ModernCheckBox> rebuiltChecks = CollectRowCheckBoxes(form.ActiveTableCard, form.SelectAllCheckBox);
+                    Assert.Equal(2, rebuiltChecks.Count);
+                    Assert.NotSame(initialChecks[0], rebuiltChecks[0]);
+                    Assert.True(rebuiltChecks[0].Checked);
+                    Assert.False(rebuiltChecks[1].Checked);
+                    Assert.True(form.ConnectSelectedButton.Visible);
+                    Assert.False(form.SelectAllCheckBox.Checked);
+                    Assert.Contains("已选 1 / 2 台", CollectAllLabelText(form.ActiveTableCard));
+
+                    form.Close();
+                }
+            }
+            finally
+            {
+                try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); }
+                catch { }
+            }
+        });
+    }
+
+    static List<ModernCheckBox> CollectRowCheckBoxes(Control root, CheckBox selectAll)
+    {
+        List<ModernCheckBox> list = new List<ModernCheckBox>();
+        CollectRowCheckBoxesCore(root, selectAll, list);
+        return list;
+    }
+
+    static void CollectRowCheckBoxesCore(Control root, CheckBox selectAll, List<ModernCheckBox> list)
+    {
+        if (root == null) return;
+        foreach (Control c in root.Controls)
+        {
+            ModernCheckBox cb = c as ModernCheckBox;
+            if (cb != null && !ReferenceEquals(cb, selectAll) && cb.Tag is DeviceItem)
+            {
+                list.Add(cb);
+            }
+            CollectRowCheckBoxesCore(c, selectAll, list);
+        }
+    }
+
+    static string CollectAllLabelText(Control root)
+    {
+        if (root == null) return "";
+        List<string> texts = new List<string>();
+        CollectAllLabelTextCore(root, texts);
+        return string.Join(" | ", texts);
+    }
+
+    static void CollectAllLabelTextCore(Control root, List<string> texts)
+    {
+        foreach (Control c in root.Controls)
+        {
+            Label lbl = c as Label;
+            if (lbl != null && !string.IsNullOrEmpty(lbl.Text)) texts.Add(lbl.Text);
+            CollectAllLabelTextCore(c, texts);
+        }
+    }
+
     static Button FindDescendantButton(Control root, string text)
     {
         foreach (Control c in root.Controls)

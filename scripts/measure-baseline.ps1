@@ -18,13 +18,16 @@ $appDll = Join-Path $buildDir 'WinScrcpy.dll'
 $normalExePath = Join-Path $buildDir 'WinScrcpy.exe'
 $fdPublishExe = Join-Path $repoRoot "bin\$Configuration\net10.0-windows\win-x64\publish-framework-dependent\WinScrcpy.exe"
 $scPublishExe = Join-Path $repoRoot "bin\$Configuration\net10.0-windows\win-x64\publish-selfcontained\WinScrcpy.exe"
+$scCompPublishExe = Join-Path $repoRoot "bin\$Configuration\net10.0-windows\win-x64\publish-selfcontained-compressed\WinScrcpy.exe"
 $fdZip = Join-Path $repoRoot "bin\$Configuration\WinScrcpy-win-x64-framework-dependent.zip"
 $scZip = Join-Path $repoRoot "bin\$Configuration\WinScrcpy-win-x64-selfcontained.zip"
+$scCompZip = Join-Path $repoRoot "bin\$Configuration\WinScrcpy-win-x64-selfcontained-compressed.zip"
 
 if (-not $NoBuild) {
     & $buildScript -Configuration $Configuration | Out-Null
     & $buildScript -Configuration $Configuration -Publish -Package | Out-Null
     & $buildScript -Configuration $Configuration -Publish -SelfContained -Package | Out-Null
+    & $buildScript -Configuration $Configuration -Publish -SelfContained -Compress -Package | Out-Null
 } elseif (-not (Test-Path -LiteralPath $appDll)) {
     throw "WinScrcpy.dll was not found at '$appDll'. Run without -NoBuild first."
 }
@@ -173,7 +176,10 @@ static class MockAdb {
         $targets.Add("net10_fd_sf|迁移后 · 单文件 (.NET 10 框架依赖)|$fdPublishExe|false")
     }
     if (Test-Path -LiteralPath $scPublishExe) {
-        $targets.Add("net10_sc_sf|迁移后 · 压缩自包含单文件 (.NET 10 SingleFile)|$scPublishExe|false")
+        $targets.Add("net10_sc_sf|迁移后 · 不压缩自包含单文件 (.NET 10 SingleFile)|$scPublishExe|false")
+    }
+    if (Test-Path -LiteralPath $scCompPublishExe) {
+        $targets.Add("net10_sc_comp_sf|迁移后 · 压缩自包含单文件 (.NET 10 SingleFile)|$scCompPublishExe|false")
     }
     $targetsFile = Join-Path $runnerDir 'targets.txt'
     [System.IO.File]::WriteAllLines($targetsFile, $targets, (New-Object System.Text.UTF8Encoding($false)))
@@ -361,6 +367,8 @@ internal static class Program
         MeasureConfigRoundTrip();
         MeasureDiscoveryBoundedProbe();
         MeasureMainFormSingleRender();
+        MeasureSameListRefresh(2);
+        MeasureSameListRefresh(10);
         return 0;
     }
 
@@ -724,6 +732,51 @@ internal static class Program
         Console.WriteLine("DEVICE_DPI=" + dpi);
         Console.WriteLine(string.Format("UI_MAINFORM_10DEV_SINGLE_MS={0:F1}", sw.Elapsed.TotalMilliseconds));
     }
+
+    static void MeasureSameListRefresh(int deviceCount)
+    {
+        StringBuilder devSb = new StringBuilder("List of devices attached\n");
+        for (int i = 0; i < deviceCount; i++)
+        {
+            devSb.AppendFormat("DEV{0:D3}\tdevice model:Pixel_{0}\n", i);
+        }
+        string raw = devSb.ToString();
+        AppConfig cfg = AppConfig.CreateDefault();
+        ConfigManager mgr = new ConfigManager(Path.Combine(Path.GetTempPath(), "winscrcpy_refresh_bench.json"));
+
+        List<double> samples = new List<double>();
+        List<double> allocKb = new List<double>();
+        int rebuildsAfterWarmup = 0;
+        using (MainForm form = new MainForm(mgr, cfg, null, false))
+        {
+            form.ShowInTaskbar = false;
+            form.StartPosition = FormStartPosition.Manual;
+            form.Location = new Point(-32000, -32000);
+            form.Show();
+            form.LoadScanResultForTest(AdbScanner.ParseAndMerge(raw, ""));
+            Application.DoEvents();
+            int baseRebuild = form.RebuildCountForTest;
+
+            for (int i = 0; i < 5; i++)
+            {
+                ScanResult dup = AdbScanner.ParseAndMerge(raw, "");
+                long a0 = GC.GetAllocatedBytesForCurrentThread();
+                Stopwatch sw = Stopwatch.StartNew();
+                form.LoadScanResultForTest(dup);
+                Application.DoEvents();
+                sw.Stop();
+                long a1 = GC.GetAllocatedBytesForCurrentThread();
+                samples.Add(sw.Elapsed.TotalMilliseconds);
+                allocKb.Add((a1 - a0) / 1024.0);
+            }
+            rebuildsAfterWarmup = form.RebuildCountForTest - baseRebuild;
+            form.Close();
+        }
+        samples.Sort();
+        Console.WriteLine(string.Format(
+            "UI_SAME_LIST_REFRESH_{0}DEV=avg:{1:F3} ms,p95:{2:F3} ms,alloc:{3:F1} KB,rebuilds:{4}",
+            deviceCount, samples.Average(), Percentile(samples, 0.95), allocKb.Average(), rebuildsAfterWarmup));
+    }
 }
 '@
 
@@ -769,8 +822,10 @@ internal static class Program
     $normalExeMeta = Get-ArtifactMeta $normalExePath '未构建'
     $fdExeMeta = Get-ArtifactMeta $fdPublishExe '未发布 (可加 -Publish)'
     $scExeMeta = Get-ArtifactMeta $scPublishExe '未发布 (可加 -Publish -SelfContained)'
+    $scCompExeMeta = Get-ArtifactMeta $scCompPublishExe '未发布 (可加 -Publish -SelfContained -Compress)'
     $fdZipMeta = Get-ArtifactMeta $fdZip '未打包 (可加 -Publish -Package)'
     $scZipMeta = Get-ArtifactMeta $scZip '未打包 (可加 -Publish -SelfContained -Package)'
+    $scCompZipMeta = Get-ArtifactMeta $scCompZip '未打包 (可加 -Publish -SelfContained -Compress -Package)'
     $normalDirMb = if (Test-Path -LiteralPath $buildDir) {
         $sum = (Get-ChildItem -LiteralPath $buildDir -File | Measure-Object -Property Length -Sum).Sum
         '{0:N2} MB' -f ($sum / 1MB)
@@ -798,9 +853,11 @@ internal static class Program
 | 普通构建入口 EXE（框架依赖） | ``bin\$Configuration\net10.0-windows\WinScrcpy.exe`` | $($normalExeMeta.Size) | ``$($normalExeMeta.Sha256)`` |
 | 普通构建目录总大小（框架依赖） | ``bin\$Configuration\net10.0-windows\`` | $normalDirMb | - |
 | 单文件发布（框架依赖） | ``bin\$Configuration\net10.0-windows\win-x64\publish-framework-dependent\WinScrcpy.exe`` | $($fdExeMeta.Size) | ``$($fdExeMeta.Sha256)`` |
-| 单文件发布（压缩自包含） | ``bin\$Configuration\net10.0-windows\win-x64\publish-selfcontained\WinScrcpy.exe`` | $($scExeMeta.Size) | ``$($scExeMeta.Sha256)`` |
+| 单文件发布（不压缩自包含，推荐） | ``bin\$Configuration\net10.0-windows\win-x64\publish-selfcontained\WinScrcpy.exe`` | $($scExeMeta.Size) | ``$($scExeMeta.Sha256)`` |
+| 单文件发布（压缩自包含，小体积） | ``bin\$Configuration\net10.0-windows\win-x64\publish-selfcontained-compressed\WinScrcpy.exe`` | $($scCompExeMeta.Size) | ``$($scCompExeMeta.Sha256)`` |
 | 便携发布包（框架依赖） | ``bin\$Configuration\WinScrcpy-win-x64-framework-dependent.zip`` | $($fdZipMeta.Size) | ``$($fdZipMeta.Sha256)`` |
-| 便携发布包（压缩自包含） | ``bin\$Configuration\WinScrcpy-win-x64-selfcontained.zip`` | $($scZipMeta.Size) | ``$($scZipMeta.Sha256)`` |
+| 便携发布包（不压缩自包含） | ``bin\$Configuration\WinScrcpy-win-x64-selfcontained.zip`` | $($scZipMeta.Size) | ``$($scZipMeta.Sha256)`` |
+| 便携发布包（压缩自包含） | ``bin\$Configuration\WinScrcpy-win-x64-selfcontained-compressed.zip`` | $($scCompZipMeta.Size) | ``$($scCompZipMeta.Sha256)`` |
 
 ## 应用端到端启动与空闲资源基线（独立进程实测）
 
@@ -821,6 +878,8 @@ $e2eTable
 | 20 项设备 ``ConfigManager.LoadOrCreate`` | $($metrics['CONFIG_LOAD_MS']) ms | 同进程连续 30 次（已预热） |
 | 12 个本地回环端点的 ``DeviceDiscoveryService.ScanAsync`` | $($metrics['DISCOVERY_12EP_LOOPBACK_MS']) ms | 4 个监听中 + 8 个已关闭端口，5 次统计 |
 | 同进程单次 ``MainForm`` 创建 + 10 台设备首轮渲染与 DPI 布局 | $($metrics['UI_MAINFORM_10DEV_SINGLE_MS']) ms | 仅用于组件渲染回归参考，不代表应用冷启动 |
+| 同窗体相同列表刷新（2 台 / 5 次） | $($metrics['UI_SAME_LIST_REFRESH_2DEV']) | 快照匹配跳过控件销毁与重建 |
+| 同窗体相同列表刷新（10 台 / 5 次） | $($metrics['UI_SAME_LIST_REFRESH_10DEV']) | 快照匹配跳过控件销毁与重建 |
 
 > 附注：此前同进程连续 6 次创建并 ``Show()/Close()`` ``MainForm`` 时，第 2~3 次起出现约 1,798~2,020 ms 的反常耗时；经实测排查，空 ``new System.Windows.Forms.Form()`` 在同进程连续 ``Show()/Close()`` 到第 7 次起同样触发约 2,013 ms 的系统级 ``Form.Show()`` 阻塞，属于同进程重复弹窗测量的系统伪影，并非 ``MainForm`` 性能退化。实际应用启动性能请以上方「应用端到端启动与空闲资源基线」为准。
 "@

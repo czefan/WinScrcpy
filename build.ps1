@@ -3,6 +3,7 @@ param(
     [string]$Configuration = 'Release',
     [switch]$Publish,
     [switch]$SelfContained,
+    [switch]$Compress,
     [switch]$Package,
     [switch]$RegenerateIcon,
     [switch]$Test
@@ -24,7 +25,11 @@ if ($RegenerateIcon -or -not (Test-Path -LiteralPath $iconPath) -or -not (Test-P
     & $iconScript -Force:$RegenerateIcon
 }
 
-$publishFlavor = if ($SelfContained) { 'selfcontained' } else { 'framework-dependent' }
+$publishFlavor = if ($SelfContained) {
+    if ($Compress) { 'selfcontained-compressed' } else { 'selfcontained' }
+} else {
+    'framework-dependent'
+}
 $publishDir = Join-Path $PSScriptRoot "bin\$Configuration\net10.0-windows\win-x64\publish-$publishFlavor"
 $outputExe = if ($Publish) {
     Join-Path $publishDir 'WinScrcpy.exe'
@@ -44,7 +49,7 @@ if ($Publish) {
         Get-ChildItem -LiteralPath $publishDir -Filter '*.pdb' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     }
     $scArg = if ($SelfContained) { 'true' } else { 'false' }
-    $compressArg = if ($SelfContained) { 'true' } else { 'false' }
+    $compressArg = if ($SelfContained -and $Compress) { 'true' } else { 'false' }
     & dotnet publish $projectPath -c $Configuration -r win-x64 --self-contained $scArg -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=$compressArg -p:DebugType=None -p:DebugSymbols=false -o $publishDir
 } else {
     & dotnet build $projectPath -c $Configuration
@@ -57,7 +62,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Output "Built: $outputExe"
 
 if ($Package) {
-    $flavor = if ($SelfContained) { 'win-x64-selfcontained' } else { 'win-x64-framework-dependent' }
+    $flavor = "win-x64-$publishFlavor"
     $zipPath = Join-Path $PSScriptRoot "bin\$Configuration\WinScrcpy-$flavor.zip"
     $stagingDir = Join-Path $PSScriptRoot "obj\$Configuration\package-$flavor"
     if (Test-Path -LiteralPath $stagingDir) {

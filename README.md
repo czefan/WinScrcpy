@@ -72,16 +72,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 .\bin\Release\net10.0-windows\WinScrcpy.exe
 ```
 
-单文件发布与可选图标生成（按发布类型分别输出到 `bin\Release\net10.0-windows\win-x64\publish-framework-dependent\WinScrcpy.exe` 与 `publish-selfcontained\WinScrcpy.exe`）：
+单文件发布与可选图标生成（按发布类型分别输出到 `bin\Release\net10.0-windows\win-x64\publish-framework-dependent\WinScrcpy.exe`、`publish-selfcontained\WinScrcpy.exe` 与 `publish-selfcontained-compressed\WinScrcpy.exe`）：
 
 ```powershell
 # 框架依赖单文件发布（需目标机具备 .NET 10 Desktop Runtime）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Publish
 
-# 自包含单文件发布（无需预装 .NET 运行时）
+# 自包含单文件发布（推荐：默认不压缩，冷启动与内存占用更优，无需预装 .NET 运行时）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Publish -SelfContained
 
-# 打包便携发布压缩包（输出到 bin\Release\WinScrcpy-win-x64-selfcontained.zip）
+# 小体积压缩自包含单文件发布（包体更小，适合分发带宽受限场景）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Publish -SelfContained -Compress
+
+# 打包便携发布压缩包（默认输出到 bin\Release\WinScrcpy-win-x64-selfcontained.zip）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Publish -SelfContained -Package
 
 # 可选：重新生成 assets\app.ico 与 assets\icon.png

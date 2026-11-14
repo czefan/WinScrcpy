@@ -37,6 +37,7 @@ internal sealed class MainForm : Form
     readonly List<CheckBox> rowCheckBoxes = new List<CheckBox>();
     readonly List<PairingServiceInfo> lastPairingServices = new List<PairingServiceInfo>();
     ScanResult lastScanResult;
+    DisplaySnapshot renderedSnapshot;
     Color statusDotColor = UiTheme.StatusGreen;
     bool isActionBusy;
     bool isScanning;
@@ -254,19 +255,24 @@ internal sealed class MainForm : Form
         {
             statusLabel.Height = statusLabel.PreferredHeight;
         }
+        RebuildDeviceListPreservingSelection();
+    }
+
+    internal void RebuildDeviceListPreservingSelection()
+    {
         if (lastScanResult != null)
         {
-            HashSet<DeviceItem> checkedItems = new HashSet<DeviceItem>();
+            HashSet<DeviceSelectionKey> checkedKeys = new HashSet<DeviceSelectionKey>();
             for (int i = 0; i < rowCheckBoxes.Count; i++)
             {
                 DeviceItem item = rowCheckBoxes[i].Tag as DeviceItem;
                 if (rowCheckBoxes[i].Checked && item != null)
                 {
-                    checkedItems.Add(item);
+                    checkedKeys.Add(DeviceSelectionKey.FromItem(item));
                 }
             }
-            ApplyScanResult(lastScanResult);
-            if (checkedItems.Count > 0)
+            ApplyScanResult(lastScanResult, forceRebuild: true);
+            if (checkedKeys.Count > 0)
             {
                 syncingCheckBoxes = true;
                 try
@@ -274,7 +280,7 @@ internal sealed class MainForm : Form
                     for (int i = 0; i < rowCheckBoxes.Count; i++)
                     {
                         DeviceItem item = rowCheckBoxes[i].Tag as DeviceItem;
-                        if (item != null && checkedItems.Contains(item))
+                        if (item != null && checkedKeys.Contains(DeviceSelectionKey.FromItem(item)))
                         {
                             rowCheckBoxes[i].Checked = true;
                         }
@@ -289,7 +295,7 @@ internal sealed class MainForm : Form
         }
         else if (listHost.Controls.Count > 0)
         {
-            ApplyScanResult(new ScanResult());
+            ApplyScanResult(new ScanResult(), forceRebuild: true);
         }
     }
 
@@ -420,6 +426,8 @@ internal sealed class MainForm : Form
     {
         get { return rowCheckBoxes.Count; }
     }
+
+    internal int RebuildCountForTest { get; private set; }
 
     internal async void RunBusyActionForTest(string statusText, Action work, string failureContext = "操作失败")
     {
@@ -666,7 +674,7 @@ internal sealed class MainForm : Form
         }
     }
 
-    void ApplyScanResult(ScanResult result)
+    void ApplyScanResult(ScanResult result, bool forceRebuild = false)
     {
         lastScanResult = result;
         lastPairingServices.Clear();
@@ -674,6 +682,15 @@ internal sealed class MainForm : Form
         {
             lastPairingServices.AddRange(result.PairingServices);
         }
+
+        DisplaySnapshot nextSnapshot = BuildDisplaySnapshot(result);
+        if (!forceRebuild && renderedSnapshot != null && renderedSnapshot.Equals(nextSnapshot) && listHost.Controls.Count > 0)
+        {
+            return;
+        }
+
+        renderedSnapshot = nextSnapshot;
+        RebuildCountForTest++;
 
         listHost.SuspendLayout();
         while (listHost.Controls.Count > 0)
@@ -708,6 +725,155 @@ internal sealed class MainForm : Form
         {
             listHost.HorizontalScroll.Enabled = false;
             listHost.HorizontalScroll.Visible = false;
+        }
+    }
+
+    DisplaySnapshot BuildDisplaySnapshot(ScanResult result)
+    {
+        DisplaySnapshot snap = new DisplaySnapshot(listHost.DeviceDpi);
+        if (result == null || result.Devices == null) return snap;
+
+        for (int i = 0; i < result.Devices.Count; i++)
+        {
+            DeviceItem item = result.Devices[i];
+            ResolvedDeviceConfig resolved = ConfigManager.Resolve(config, item);
+            string title = GetDisplayTitle(item, resolved);
+            string subText = BuildSubText(item, resolved, title);
+            snap.Rows.Add(new DisplayRowSnapshot(item, resolved.HasCustomArgs, title, subText));
+        }
+        return snap;
+    }
+
+    sealed class DisplaySnapshot
+    {
+        public readonly int Dpi;
+        public readonly List<DisplayRowSnapshot> Rows = new List<DisplayRowSnapshot>();
+
+        public DisplaySnapshot(int dpi)
+        {
+            Dpi = dpi;
+        }
+
+        public bool Equals(DisplaySnapshot other)
+        {
+            if (other == null || Dpi != other.Dpi || Rows.Count != other.Rows.Count) return false;
+            for (int i = 0; i < Rows.Count; i++)
+            {
+                if (!Rows[i].Equals(other.Rows[i])) return false;
+            }
+            return true;
+        }
+    }
+
+    sealed class DisplayRowSnapshot
+    {
+        readonly ChannelKind channel;
+        readonly string adbSerial;
+        readonly string hardwareSerial;
+        readonly string baseMdnsName;
+        readonly string model;
+        readonly bool canConnect;
+        readonly bool hasCustomArgs;
+        readonly string title;
+        readonly string subText;
+        readonly string[] candidates;
+        readonly string[] alternates;
+
+        public DisplayRowSnapshot(DeviceItem item, bool hasCustomArgs, string title, string subText)
+        {
+            channel = item.Channel;
+            adbSerial = item.AdbSerial ?? "";
+            hardwareSerial = item.HardwareSerial ?? "";
+            baseMdnsName = item.BaseMdnsName ?? "";
+            model = item.Model ?? "";
+            canConnect = item.CanConnect;
+            this.hasCustomArgs = hasCustomArgs;
+            this.title = title ?? "";
+            this.subText = subText ?? "";
+            candidates = item.CandidateEndpoints != null ? item.CandidateEndpoints.ToArray() : Array.Empty<string>();
+            alternates = item.AlternateSerials != null ? item.AlternateSerials.ToArray() : Array.Empty<string>();
+        }
+
+        public bool Equals(DisplayRowSnapshot other)
+        {
+            if (other == null) return false;
+            return channel == other.channel
+                && canConnect == other.canConnect
+                && hasCustomArgs == other.hasCustomArgs
+                && string.Equals(adbSerial, other.adbSerial, StringComparison.Ordinal)
+                && string.Equals(hardwareSerial, other.hardwareSerial, StringComparison.Ordinal)
+                && string.Equals(baseMdnsName, other.baseMdnsName, StringComparison.Ordinal)
+                && string.Equals(model, other.model, StringComparison.Ordinal)
+                && string.Equals(title, other.title, StringComparison.Ordinal)
+                && string.Equals(subText, other.subText, StringComparison.Ordinal)
+                && StringArrayEquals(candidates, other.candidates)
+                && StringArrayEquals(alternates, other.alternates);
+        }
+
+        static bool StringArrayEquals(string[] a, string[] b)
+        {
+            if (a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++)
+            {
+                if (!string.Equals(a[i], b[i], StringComparison.Ordinal)) return false;
+            }
+            return true;
+        }
+    }
+
+    readonly struct DeviceSelectionKey : IEquatable<DeviceSelectionKey>
+    {
+        readonly ChannelKind channel;
+        readonly string adbSerial;
+        readonly string hardwareSerial;
+        readonly string baseMdnsName;
+        readonly string primaryCandidate;
+
+        DeviceSelectionKey(ChannelKind channel, string adbSerial, string hardwareSerial, string baseMdnsName, string primaryCandidate)
+        {
+            this.channel = channel;
+            this.adbSerial = adbSerial;
+            this.hardwareSerial = hardwareSerial;
+            this.baseMdnsName = baseMdnsName;
+            this.primaryCandidate = primaryCandidate;
+        }
+
+        public static DeviceSelectionKey FromItem(DeviceItem item)
+        {
+            string candidate = item.CandidateEndpoints != null && item.CandidateEndpoints.Count > 0
+                ? (item.CandidateEndpoints[0] ?? "").Trim()
+                : "";
+            return new DeviceSelectionKey(
+                item.Channel,
+                (item.AdbSerial ?? "").Trim(),
+                (item.HardwareSerial ?? "").Trim(),
+                (item.BaseMdnsName ?? "").Trim(),
+                candidate);
+        }
+
+        public bool Equals(DeviceSelectionKey other)
+        {
+            return channel == other.channel
+                && string.Equals(adbSerial, other.adbSerial, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(hardwareSerial, other.hardwareSerial, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(baseMdnsName, other.baseMdnsName, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(primaryCandidate, other.primaryCandidate, StringComparison.OrdinalIgnoreCase);
+        }
+
+        public override bool Equals(object obj)
+        {
+            return obj is DeviceSelectionKey other && Equals(other);
+        }
+
+        public override int GetHashCode()
+        {
+            HashCode hash = new HashCode();
+            hash.Add(channel);
+            hash.Add(adbSerial, StringComparer.OrdinalIgnoreCase);
+            hash.Add(hardwareSerial, StringComparer.OrdinalIgnoreCase);
+            hash.Add(baseMdnsName, StringComparer.OrdinalIgnoreCase);
+            hash.Add(primaryCandidate, StringComparer.OrdinalIgnoreCase);
+            return hash.ToHashCode();
         }
     }
 
