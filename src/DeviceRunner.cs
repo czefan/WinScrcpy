@@ -7,9 +7,13 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 
 internal sealed class DeviceRunner
 {
+    public const int MaxTcpProbeConcurrency = 16;
+    public const int MaxAdbQueryConcurrency = 4;
+
     readonly AppConfig config;
     public readonly ScrcpyLauncher Scrcpy;
 
@@ -19,99 +23,205 @@ internal sealed class DeviceRunner
         this.Scrcpy = new ScrcpyLauncher(config);
     }
 
+    public Task<ScanResult> ScanAsync(Action<ScanResult> onStage1 = null, CancellationToken cancellationToken = default)
+    {
+        return ScanInternalAsync(onStage1, cancellationToken);
+    }
+
     public ScanResult Scan(CancellationToken cancellationToken = default)
     {
-        CommandOutput devOut = null;
-        CommandOutput mdnsOut = null;
+        return ScanInternalAsync(null, cancellationToken).GetAwaiter().GetResult();
+    }
 
-        Thread t1 = new Thread(delegate() { devOut = RunAdb(new string[] { "devices", "-l" }, 6000, cancellationToken); });
-        Thread t2 = new Thread(delegate() { mdnsOut = RunAdb(new string[] { "mdns", "services" }, 6000, cancellationToken); });
-        t1.IsBackground = true;
-        t2.IsBackground = true;
-        t1.Start();
-        t2.Start();
-        t1.Join();
-        t2.Join();
+    async Task<ScanResult> ScanInternalAsync(Action<ScanResult> onStage1, CancellationToken cancellationToken)
+    {
+        Task<CommandOutput> devTask = RunAdbAsync(new string[] { "devices", "-l" }, 6000, cancellationToken);
+        Task<CommandOutput> mdnsTask = RunAdbAsync(new string[] { "mdns", "services" }, 6000, cancellationToken);
+
+        CommandOutput devOut = await devTask.ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (onStage1 != null)
+        {
+            ScanResult stage1 = AdbScanner.ParseAndMerge(devOut != null ? devOut.StdOut : "", "");
+            ApplyDevicesStageWarning(stage1, devOut);
+            onStage1(stage1);
+        }
+
+        CommandOutput mdnsOut = await mdnsTask.ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
 
         ScanResult result = AdbScanner.ParseAndMerge(
             devOut != null ? devOut.StdOut : "",
             mdnsOut != null ? mdnsOut.StdOut : "");
 
-        if (devOut != null && !string.IsNullOrWhiteSpace(devOut.LaunchError))
-        {
-            result.Warning = "ADB 调用失败: " + devOut.LaunchError;
-        }
-        else if (devOut != null && devOut.Cancelled)
-        {
-            result.Warning = "ADB 扫描已取消。";
-        }
-        else if (devOut != null && devOut.TimedOut)
-        {
-            result.Warning = "adb devices 执行超时，可尝试点击「重启 ADB」。";
-        }
-        else if (devOut != null && (devOut.OutputTimedOut || !string.IsNullOrWhiteSpace(devOut.OutputError)))
-        {
-            result.Warning = "adb devices 输出读取不完整: " + devOut.GetFailureSummary("输出异常");
-        }
-        else if (mdnsOut != null && (mdnsOut.HasExecutionFailure || (mdnsOut.ExitCode != 0 && !string.IsNullOrWhiteSpace(mdnsOut.StdErr))))
+        ApplyDevicesStageWarning(result, devOut);
+        if (string.IsNullOrEmpty(result.Warning)
+            && mdnsOut != null
+            && (mdnsOut.HasExecutionFailure || (mdnsOut.ExitCode != 0 && !string.IsNullOrWhiteSpace(mdnsOut.StdErr))))
         {
             result.Warning = "mDNS 查询提示: " + mdnsOut.GetFailureSummary(mdnsOut.StdErr != null ? mdnsOut.StdErr.Trim() : "");
         }
 
-        FilterAndAppendWirelessEndpoints(result);
-        EnrichConnectedSerials(result, cancellationToken);
+        // 网络查询（TCP 探活、序列号读取）并发执行，仅返回只读映射；最终串行合并修改 result.Devices，避免竞态覆盖去重结果。
+        Task<(List<string> savedToProbe, Dictionary<string, bool> probeResults)> wirelessTask =
+            QueryWirelessReachabilityAsync(result.Devices, cancellationToken);
+        Task<Dictionary<string, string>> serialTask =
+            QueryConnectedSerialsAsync(result.Devices, cancellationToken);
+
+        await CompleteScanPostProcessAsync(result, wirelessTask, serialTask, cancellationToken).ConfigureAwait(false);
         return result;
     }
 
-    void EnrichConnectedSerials(ScanResult result, CancellationToken cancellationToken)
+    internal static async Task CompleteScanPostProcessAsync(
+        ScanResult result,
+        Task<(List<string> savedToProbe, Dictionary<string, bool> probeResults)> wirelessTask,
+        Task<Dictionary<string, string>> serialTask,
+        CancellationToken cancellationToken)
     {
-        List<DeviceItem> missing = new List<DeviceItem>();
-        for (int i = 0; i < result.Devices.Count; i++)
-        {
-            DeviceItem item = result.Devices[i];
-            if (item.Channel == ChannelKind.WirelessConnected
-                && string.IsNullOrWhiteSpace(item.HardwareSerial)
-                && !string.IsNullOrWhiteSpace(item.AdbSerial))
-            {
-                missing.Add(item);
-            }
-        }
-        if (missing.Count == 0) return;
+        await Task.WhenAll(wirelessTask, serialTask).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
 
-        Dictionary<string, string> serialMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        object sync = new object();
-        RunParallelAndWait(missing.Count, delegate(int i)
+        var wireless = await wirelessTask.ConfigureAwait(false);
+        Dictionary<string, string> serialMap = await serialTask.ConfigureAwait(false);
+        ApplyParallelScanQueries(result, wireless.savedToProbe, wireless.probeResults, serialMap);
+    }
+
+    internal static void ApplyParallelScanQueries(
+        ScanResult result,
+        IList<string> savedToProbe,
+        IDictionary<string, bool> probeResults,
+        IDictionary<string, string> serialMap)
+    {
+        if (result == null) return;
+
+        if (probeResults != null && probeResults.Count > 0)
         {
-            string target = missing[i].AdbSerial;
-            CommandOutput outp = RunAdb(new string[] { "-s", target, "shell", "getprop", "ro.serialno" }, 1500, cancellationToken);
-            if (outp.Success && !string.IsNullOrWhiteSpace(outp.StdOut))
+            AdbScanner.FilterReachableMdns(result, delegate(string ep)
             {
-                string sn = outp.StdOut.Trim();
-                if (sn.IndexOfAny(new char[] { '\r', '\n', ' ' }) < 0)
+                bool ok;
+                return probeResults.TryGetValue(ep, out ok) && ok;
+            });
+
+            if (savedToProbe != null && savedToProbe.Count > 0)
+            {
+                List<string> reachableSaved = new List<string>();
+                for (int i = 0; i < savedToProbe.Count; i++)
                 {
-                    lock (sync)
+                    bool ok;
+                    if (probeResults.TryGetValue(savedToProbe[i], out ok) && ok)
                     {
-                        serialMap[target] = sn;
+                        reachableSaved.Add(savedToProbe[i]);
                     }
                 }
+                AdbScanner.MergeReachableSavedEndpoints(result, reachableSaved);
             }
-        });
+        }
 
         AdbScanner.EnrichAndDeduplicate(result, delegate(DeviceItem item)
         {
             string sn;
-            return serialMap.TryGetValue(item.AdbSerial, out sn) ? sn : "";
+            return serialMap != null && !string.IsNullOrWhiteSpace(item.AdbSerial) && serialMap.TryGetValue(item.AdbSerial, out sn)
+                ? sn
+                : "";
         });
     }
 
-    void FilterAndAppendWirelessEndpoints(ScanResult result)
+    static void ApplyDevicesStageWarning(ScanResult result, CommandOutput devOut)
     {
+        if (devOut == null) return;
+        if (!string.IsNullOrWhiteSpace(devOut.LaunchError))
+        {
+            result.Warning = "ADB 调用失败: " + devOut.LaunchError;
+        }
+        else if (devOut.Cancelled)
+        {
+            result.Warning = "ADB 扫描已取消。";
+        }
+        else if (devOut.TimedOut)
+        {
+            result.Warning = "adb devices 执行超时，可尝试点击「重启 ADB」。";
+        }
+        else if (devOut.OutputTimedOut || !string.IsNullOrWhiteSpace(devOut.OutputError))
+        {
+            result.Warning = "adb devices 输出读取不完整: " + devOut.GetFailureSummary("输出异常");
+        }
+    }
+
+    async Task<Dictionary<string, string>> QueryConnectedSerialsAsync(IList<DeviceItem> devices, CancellationToken cancellationToken)
+    {
+        Dictionary<string, string> serialMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (devices == null || devices.Count == 0) return serialMap;
+
+        List<string> targets = new List<string>();
+        HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < devices.Count; i++)
+        {
+            DeviceItem item = devices[i];
+            if (item.Channel == ChannelKind.WirelessConnected
+                && string.IsNullOrWhiteSpace(item.HardwareSerial)
+                && !string.IsNullOrWhiteSpace(item.AdbSerial)
+                && seen.Add(item.AdbSerial))
+            {
+                targets.Add(item.AdbSerial);
+            }
+        }
+        if (targets.Count == 0) return serialMap;
+
+        object sync = new object();
+        using (SemaphoreSlim adbGate = new SemaphoreSlim(MaxAdbQueryConcurrency, MaxAdbQueryConcurrency))
+        {
+            Task[] tasks = new Task[targets.Count];
+            for (int i = 0; i < targets.Count; i++)
+            {
+                string target = targets[i];
+                tasks[i] = Task.Run(async delegate
+                {
+                    await adbGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        CommandOutput outp = await RunAdbAsync(
+                            new string[] { "-s", target, "shell", "getprop", "ro.serialno" },
+                            1500,
+                            cancellationToken).ConfigureAwait(false);
+                        if (outp.Success && !string.IsNullOrWhiteSpace(outp.StdOut))
+                        {
+                            string sn = outp.StdOut.Trim();
+                            if (sn.IndexOfAny(new char[] { '\r', '\n', ' ' }) < 0)
+                            {
+                                lock (sync)
+                                {
+                                    serialMap[target] = sn;
+                                }
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        adbGate.Release();
+                    }
+                }, cancellationToken);
+            }
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+        }
+
+        return serialMap;
+    }
+
+    async Task<(List<string> savedToProbe, Dictionary<string, bool> probeResults)> QueryWirelessReachabilityAsync(
+        IList<DeviceItem> devices,
+        CancellationToken cancellationToken)
+    {
+        List<string> savedToProbe = new List<string>();
+        Dictionary<string, bool> emptyResults = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        if (devices == null) return (savedToProbe, emptyResults);
+
         List<string> uniqueEndpoints = new List<string>();
         HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        for (int i = 0; i < result.Devices.Count; i++)
+        for (int i = 0; i < devices.Count; i++)
         {
-            DeviceItem item = result.Devices[i];
+            DeviceItem item = devices[i];
             if (item.Channel != ChannelKind.MdnsPending) continue;
             for (int k = 0; k < item.CandidateEndpoints.Count; k++)
             {
@@ -120,69 +230,76 @@ internal sealed class DeviceRunner
             }
         }
 
-        List<string> savedToProbe = new List<string>();
         if (config != null && config.savedEndpoints != null)
         {
             for (int i = 0; i < config.savedEndpoints.Count; i++)
             {
                 string ep = ConfigManager.NormalizeEndpoint(config.savedEndpoints[i]);
-                if (string.IsNullOrEmpty(ep) || AdbScanner.HasOnlineOrPendingDeviceForEndpoint(result.Devices, ep)) continue;
+                if (string.IsNullOrEmpty(ep) || AdbScanner.HasOnlineOrPendingDeviceForEndpoint(devices, ep)) continue;
                 savedToProbe.Add(ep);
                 if (seen.Add(ep)) uniqueEndpoints.Add(ep);
             }
         }
 
-        if (uniqueEndpoints.Count == 0) return;
+        if (uniqueEndpoints.Count == 0) return (savedToProbe, emptyResults);
 
-        Dictionary<string, bool> probeResults = ProbeEndpointsParallel(uniqueEndpoints, 1000);
-        AdbScanner.FilterReachableMdns(result, delegate(string ep)
-        {
-            bool ok;
-            return probeResults.TryGetValue(ep, out ok) && ok;
-        });
-
-        List<string> reachableSaved = new List<string>();
-        for (int i = 0; i < savedToProbe.Count; i++)
-        {
-            bool ok;
-            if (probeResults.TryGetValue(savedToProbe[i], out ok) && ok)
-            {
-                reachableSaved.Add(savedToProbe[i]);
-            }
-        }
-        AdbScanner.MergeReachableSavedEndpoints(result, reachableSaved);
+        Dictionary<string, bool> probeResults = await ProbeEndpointsAsync(
+            uniqueEndpoints, 1000, MaxTcpProbeConcurrency, cancellationToken).ConfigureAwait(false);
+        return (savedToProbe, probeResults);
     }
 
-    static Dictionary<string, bool> ProbeEndpointsParallel(List<string> endpoints, int timeoutMs)
+    internal static async Task<Dictionary<string, bool>> ProbeEndpointsAsync(
+        IList<string> endpoints,
+        int timeoutMs,
+        int maxConcurrency,
+        CancellationToken cancellationToken,
+        Func<string, int, CancellationToken, Task<bool>> probeOverride = null)
     {
         Dictionary<string, bool> results = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        if (endpoints == null || endpoints.Count == 0) return results;
+
+        int limit = Math.Max(1, maxConcurrency);
+        Func<string, int, CancellationToken, Task<bool>> probeFn = probeOverride ?? ProbeTcpEndpointAsync;
         object sync = new object();
-        RunParallelAndWait(endpoints.Count, delegate(int i)
+
+        using (SemaphoreSlim gate = new SemaphoreSlim(limit, limit))
         {
-            string ep = endpoints[i];
-            bool reachable = ProbeTcpEndpoint(ep, timeoutMs);
+            Task[] tasks = new Task[endpoints.Count];
+            for (int i = 0; i < endpoints.Count; i++)
+            {
+                string ep = endpoints[i];
+                tasks[i] = ProbeOneEndpointAsync(ep, timeoutMs, gate, probeFn, results, sync, cancellationToken);
+            }
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+        }
+        return results;
+    }
+
+    static async Task ProbeOneEndpointAsync(
+        string ep,
+        int timeoutMs,
+        SemaphoreSlim gate,
+        Func<string, int, CancellationToken, Task<bool>> probeFn,
+        Dictionary<string, bool> results,
+        object sync,
+        CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            bool reachable = false;
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                reachable = await probeFn(ep, timeoutMs, cancellationToken).ConfigureAwait(false);
+            }
             lock (sync)
             {
                 results[ep] = reachable;
             }
-        });
-        return results;
-    }
-
-    // 阻塞型并发任务（TCP 探测、adb 调用）使用独立线程，避免占满线程池后新线程按约 500ms 节奏注入导致扫描变慢。
-    static void RunParallelAndWait(int count, Action<int> work)
-    {
-        Thread[] threads = new Thread[count];
-        for (int i = 0; i < count; i++)
-        {
-            int index = i;
-            threads[i] = new Thread(delegate() { work(index); });
-            threads[i].IsBackground = true;
-            threads[i].Start();
         }
-        for (int i = 0; i < count; i++)
+        finally
         {
-            threads[i].Join();
+            gate.Release();
         }
     }
 
@@ -211,7 +328,7 @@ internal sealed class DeviceRunner
         return true;
     }
 
-    static bool ProbeTcpEndpoint(string endpoint, int timeoutMs)
+    internal static async Task<bool> ProbeTcpEndpointAsync(string endpoint, int timeoutMs, CancellationToken cancellationToken)
     {
         string host;
         int port;
@@ -222,27 +339,18 @@ internal sealed class DeviceRunner
             ? AddressFamily.InterNetworkV6
             : AddressFamily.InterNetwork;
 
-        TcpClient client = new TcpClient(family);
-        IAsyncResult ar = null;
-        try
+        using (TcpClient client = new TcpClient(family))
+        using (CancellationTokenSource timeoutCts = timeoutMs > 0 ? new CancellationTokenSource(timeoutMs) : new CancellationTokenSource())
+        using (CancellationTokenSource linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token))
         {
-            ar = client.BeginConnect(host, port, null, null);
-            if (!ar.AsyncWaitHandle.WaitOne(timeoutMs)) return false;
-            client.EndConnect(ar);
-            return client.Connected;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
-        finally
-        {
-            try { client.Close(); }
-            catch (Exception) { }
-            if (ar != null)
+            try
             {
-                try { ar.AsyncWaitHandle.Close(); }
-                catch (Exception) { }
+                await client.ConnectAsync(host, port, linkedCts.Token).ConfigureAwait(false);
+                return client.Connected;
+            }
+            catch (Exception)
+            {
+                return false;
             }
         }
     }
@@ -252,84 +360,82 @@ internal sealed class DeviceRunner
         return ToolPathResolver.ResolveTool(config != null ? config.adbPath : "adb", "adb");
     }
 
-    public CommandOutput RunAdb(IList<string> args, int timeoutMs, CancellationToken cancellationToken = default)
+    public Task<CommandOutput> RunAdbAsync(IList<string> args, int timeoutMs, CancellationToken cancellationToken = default)
     {
         ToolResolutionResult adbRes = ResolveAdbPath();
         if (!adbRes.Success)
         {
-            return new CommandOutput
+            return Task.FromResult(new CommandOutput
             {
                 ExitCode = -1,
                 LaunchError = adbRes.Error
-            };
+            });
         }
 
         Dictionary<string, string> env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // 禁止 adb 后台服务按 mDNS 广播自动连接无线设备，将「扫描」与「手动连接」彻底分离。
         env["ADB_MDNS_AUTO_CONNECT"] = "0";
-        return ProcessRunner.RunText(adbRes.ResolvedPath, args, timeoutMs, env, AppContext.BaseDirectory, cancellationToken);
+        return ProcessRunner.RunTextAsync(adbRes.ResolvedPath, args, timeoutMs, env, AppContext.BaseDirectory, cancellationToken);
     }
 
-    public List<PairingServiceInfo> ListPairingServices(CancellationToken cancellationToken = default)
+    public CommandOutput RunAdb(IList<string> args, int timeoutMs, CancellationToken cancellationToken = default)
     {
-        CommandOutput mdnsOut = RunAdb(new string[] { "mdns", "services" }, 3000, cancellationToken);
+        return RunAdbAsync(args, timeoutMs, cancellationToken).GetAwaiter().GetResult();
+    }
+
+    public async Task<List<PairingServiceInfo>> ListPairingServicesAsync(CancellationToken cancellationToken = default)
+    {
+        CommandOutput mdnsOut = await RunAdbAsync(new string[] { "mdns", "services" }, 3000, cancellationToken).ConfigureAwait(false);
         return (mdnsOut != null && mdnsOut.Success)
             ? AdbScanner.ParsePairingServices(mdnsOut.StdOut)
             : new List<PairingServiceInfo>();
     }
 
-    public bool EnsureConnected(DeviceItem item, out string activeSerial, out string error)
+    public async Task<(bool ok, string activeSerial, string error)> EnsureConnectedAsync(DeviceItem item, CancellationToken cancellationToken = default)
     {
-        activeSerial = "";
-        error = "";
-
         if (item.Channel == ChannelKind.Usb || item.Channel == ChannelKind.WirelessConnected)
         {
-            activeSerial = item.AdbSerial;
-            return true;
+            return (true, item.AdbSerial, "");
         }
 
         if (item.Channel == ChannelKind.Unauthorized)
         {
-            error = "设备未授权，请在手机弹窗中点击「允许 USB 调试」。";
-            return false;
+            return (false, "", "设备未授权，请在手机弹窗中点击「允许 USB 调试」。");
         }
 
         if (item.CandidateEndpoints == null || item.CandidateEndpoints.Count == 0)
         {
-            error = "设备离线且未发现可用无线端点。";
-            return false;
+            return (false, "", "设备离线且未发现可用无线端点。");
         }
 
         string lastError = "无法连接到设备。";
         for (int i = 0; i < item.CandidateEndpoints.Count; i++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string ep = item.CandidateEndpoints[i];
-            string err;
-            if (ConnectEndpoint(ep, out err))
+            (bool ok, string err) = await ConnectEndpointAsync(ep, cancellationToken).ConfigureAwait(false);
+            if (ok)
             {
-                activeSerial = ep;
-                return true;
+                return (true, ep, "");
             }
             lastError = string.Format("{0}: {1}", ep, err);
         }
 
-        error = lastError;
-        return false;
+        return (false, "", lastError);
     }
 
-    public bool ConnectEndpoint(string endpoint, out string error)
+    public async Task<(bool ok, string error)> ConnectEndpointAsync(string endpoint, CancellationToken cancellationToken = default)
     {
-        string msg;
-        if (!RunAdbConnectRaw(endpoint, out msg, out error)) return false;
+        (bool rawOk, string msg, string error) = await RunAdbConnectRawAsync(endpoint, cancellationToken).ConfigureAwait(false);
+        if (!rawOk) return (false, error);
 
         // If adb still held a stale "offline" handle, adb connect replies "already connected to" without reviving it;
         // disconnect and reconnect once so the session comes back cleanly.
         if (msg.IndexOf("already connected to", StringComparison.OrdinalIgnoreCase) >= 0)
         {
-            string ignored;
-            RunSingleDisconnect(endpoint, out ignored);
-            if (!RunAdbConnectRaw(endpoint, out msg, out error)) return false;
+            await RunSingleDisconnectAsync(endpoint, cancellationToken).ConfigureAwait(false);
+            (rawOk, msg, error) = await RunAdbConnectRawAsync(endpoint, cancellationToken).ConfigureAwait(false);
+            if (!rawOk) return (false, error);
         }
 
         if (msg.IndexOf("connected to", StringComparison.OrdinalIgnoreCase) >= 0
@@ -337,42 +443,34 @@ internal sealed class DeviceRunner
             && msg.IndexOf("failed", StringComparison.OrdinalIgnoreCase) < 0
             && msg.IndexOf("unable to connect", StringComparison.OrdinalIgnoreCase) < 0)
         {
-            return true;
+            return (true, "");
         }
 
-        error = string.IsNullOrWhiteSpace(msg) ? "adb connect 返回空响应" : msg;
-        return false;
+        return (false, string.IsNullOrWhiteSpace(msg) ? "adb connect 返回空响应" : msg);
     }
 
-    bool RunAdbConnectRaw(string endpoint, out string msg, out string error)
+    async Task<(bool ok, string msg, string error)> RunAdbConnectRawAsync(string endpoint, CancellationToken cancellationToken)
     {
-        msg = "";
-        error = "";
-        CommandOutput outp = RunAdb(new string[] { "connect", endpoint }, 5000);
+        CommandOutput outp = await RunAdbAsync(new string[] { "connect", endpoint }, 5000, cancellationToken).ConfigureAwait(false);
         if (outp.HasExecutionFailure)
         {
-            error = outp.GetFailureSummary("adb connect 失败", "连接超时", "连接已取消");
-            return false;
+            return (false, "", outp.GetFailureSummary("adb connect 失败", "连接超时", "连接已取消"));
         }
-        msg = outp.CombinedOutput;
-        return true;
+        return (true, outp.CombinedOutput, "");
     }
 
-    public bool DisconnectDevice(DeviceItem item, out string error)
+    public async Task<(bool ok, string error)> DisconnectDeviceAsync(DeviceItem item, CancellationToken cancellationToken = default)
     {
-        error = "";
         if (item == null || item.Channel == ChannelKind.Usb)
         {
-            error = "USB 有线设备无法通过软件断开，请直接拔出数据线。";
-            return false;
+            return (false, "USB 有线设备无法通过软件断开，请直接拔出数据线。");
         }
 
         List<string> activeHandles = BuildActiveDisconnectHandles(item);
         List<string> fallbackTargets = BuildDisconnectTargets(item);
         if (activeHandles.Count == 0 && fallbackTargets.Count == 0)
         {
-            error = "未找到可断开的无线端点。";
-            return false;
+            return (false, "未找到可断开的无线端点。");
         }
 
         bool anySucceeded = false;
@@ -381,8 +479,8 @@ internal sealed class DeviceRunner
         // Disconnect all merged active wireless handles (e.g. both ip:port and mDNS TLS serial).
         for (int i = 0; i < activeHandles.Count; i++)
         {
-            string err;
-            if (RunSingleDisconnect(activeHandles[i], out err))
+            (bool ok, string err) = await RunSingleDisconnectAsync(activeHandles[i], cancellationToken).ConfigureAwait(false);
+            if (ok)
             {
                 anySucceeded = true;
             }
@@ -392,33 +490,30 @@ internal sealed class DeviceRunner
             }
         }
 
-        if (anySucceeded) return true;
+        if (anySucceeded) return (true, "");
 
         // If active handles were mDNS names that adb disconnect refused directly, fall back to ip:port candidates.
         for (int i = 0; i < fallbackTargets.Count; i++)
         {
             string target = fallbackTargets[i];
             if (AdbScanner.ContainsIgnoreCase(activeHandles, target)) continue;
-            string err;
-            if (RunSingleDisconnect(target, out err))
+            (bool ok, string err) = await RunSingleDisconnectAsync(target, cancellationToken).ConfigureAwait(false);
+            if (ok)
             {
-                return true;
+                return (true, "");
             }
             lastError = err;
         }
 
-        error = lastError;
-        return false;
+        return (false, lastError);
     }
 
-    bool RunSingleDisconnect(string target, out string error)
+    async Task<(bool ok, string error)> RunSingleDisconnectAsync(string target, CancellationToken cancellationToken)
     {
-        error = "";
-        CommandOutput outp = RunAdb(new string[] { "disconnect", target }, 5000);
+        CommandOutput outp = await RunAdbAsync(new string[] { "disconnect", target }, 5000, cancellationToken).ConfigureAwait(false);
         if (outp.HasExecutionFailure)
         {
-            error = outp.GetFailureSummary("adb disconnect 失败", "断开超时", "断开已取消");
-            return false;
+            return (false, outp.GetFailureSummary("adb disconnect 失败", "断开超时", "断开已取消"));
         }
 
         string msg = outp.CombinedOutput;
@@ -426,10 +521,9 @@ internal sealed class DeviceRunner
             && msg.IndexOf("error:", StringComparison.OrdinalIgnoreCase) < 0
             && msg.IndexOf("no such device", StringComparison.OrdinalIgnoreCase) < 0)
         {
-            return true;
+            return (true, "");
         }
-        error = string.IsNullOrWhiteSpace(msg) ? "adb disconnect 失败" : msg;
-        return false;
+        return (false, string.IsNullOrWhiteSpace(msg) ? "adb disconnect 失败" : msg);
     }
 
     static List<string> BuildActiveDisconnectHandles(DeviceItem item)
@@ -489,59 +583,52 @@ internal sealed class DeviceRunner
         return targets;
     }
 
-    public bool PairEndpoint(string endpoint, string code, out string message)
+    public async Task<(bool ok, string message)> PairEndpointAsync(string endpoint, string code, CancellationToken cancellationToken = default)
     {
-        CommandOutput outp = RunAdb(new string[] { "pair", endpoint, code }, 8000);
+        CommandOutput outp = await RunAdbAsync(new string[] { "pair", endpoint, code }, 8000, cancellationToken).ConfigureAwait(false);
         if (outp.HasExecutionFailure)
         {
-            message = outp.GetFailureSummary("配对失败", "配对超时，请核对手机屏幕上显示的 IP:Port 与配对码。", "配对已取消。");
-            return false;
+            return (false, outp.GetFailureSummary("配对失败", "配对超时，请核对手机屏幕上显示的 IP:Port 与配对码。", "配对已取消。"));
         }
 
         string msg = outp.CombinedOutput;
         bool ok = outp.ExitCode == 0 && msg.IndexOf("Successfully paired", StringComparison.OrdinalIgnoreCase) >= 0;
-        message = string.IsNullOrWhiteSpace(msg) ? (ok ? "配对成功" : "配对失败") : msg;
-        return ok;
+        return (ok, string.IsNullOrWhiteSpace(msg) ? (ok ? "配对成功" : "配对失败") : msg);
     }
 
-    public bool CaptureScreenshot(string activeSerial, out Bitmap bitmap, out string error, CancellationToken cancellationToken = default)
+    public async Task<(bool ok, Bitmap bitmap, string error)> CaptureScreenshotAsync(string activeSerial, CancellationToken cancellationToken = default)
     {
-        bitmap = null;
-        error = "";
         ToolResolutionResult adbRes = ResolveAdbPath();
         if (!adbRes.Success)
         {
-            error = adbRes.Error;
-            return false;
+            return (false, null, adbRes.Error);
         }
 
         Dictionary<string, string> env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         env["ADB_MDNS_AUTO_CONNECT"] = "0";
 
-        CommandOutput outp = ProcessRunner.RunBinary(
+        CommandOutput outp = await ProcessRunner.RunBinaryAsync(
             adbRes.ResolvedPath,
             new string[] { "-s", activeSerial, "exec-out", "screencap", "-p" },
             12000,
             env,
             AppContext.BaseDirectory,
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
 
         if (outp.HasExecutionFailure)
         {
-            error = outp.GetFailureSummary(
+            return (false, null, outp.GetFailureSummary(
                 "读取截图数据失败。",
                 "截屏超时，请确认设备屏幕正常且 ADB 连接未断开。",
-                "截屏已取消。");
-            return false;
+                "截屏已取消。"));
         }
 
         if (outp.ExitCode != 0 || !IsPngHeader(outp.StdOutBytes))
         {
             string errText = (outp.StdErr ?? "").Trim();
-            error = string.IsNullOrWhiteSpace(errText)
+            return (false, null, string.IsNullOrWhiteSpace(errText)
                 ? "设备未能返回有效的 PNG 截图数据。"
-                : errText;
-            return false;
+                : errText);
         }
 
         try
@@ -549,14 +636,12 @@ internal sealed class DeviceRunner
             using (MemoryStream ms = new MemoryStream(outp.StdOutBytes))
             using (Bitmap raw = new Bitmap(ms))
             {
-                bitmap = new Bitmap(raw);
+                return (true, new Bitmap(raw), "");
             }
-            return true;
         }
         catch (Exception ex)
         {
-            error = "解析截图图像失败: " + ex.Message;
-            return false;
+            return (false, null, "解析截图图像失败: " + ex.Message);
         }
     }
 

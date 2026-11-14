@@ -6,6 +6,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.Security.Cryptography;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 internal sealed class PairDialog : Form
@@ -31,6 +32,7 @@ internal sealed class PairDialog : Form
     readonly DeviceRunner runner;
     readonly string discoveredPairingEndpoint;
     readonly System.Windows.Forms.Timer pollTimer;
+    readonly CancellationTokenSource dialogCts = new CancellationTokenSource();
 
     bool isQrMode = true;
     bool pollingEnabled = true;
@@ -288,18 +290,38 @@ internal sealed class PairDialog : Form
                 FocusCodeInput();
             }
         };
-        FormClosed += delegate { pollTimer.Stop(); };
+        FormClosing += delegate { StopBackgroundWork(); };
+        FormClosed += delegate { StopBackgroundWork(); };
+    }
+
+    internal bool IsBackgroundPollingActiveForTest
+    {
+        get { return pollingEnabled || (pollTimer != null && pollTimer.Enabled); }
+    }
+
+    internal bool IsDialogCancelledForTest
+    {
+        get { return dialogCts.IsCancellationRequested; }
+    }
+
+    void StopBackgroundWork()
+    {
+        pollingEnabled = false;
+        if (pollTimer != null) pollTimer.Stop();
+        try { dialogCts.Cancel(); }
+        catch (Exception) { }
     }
 
     protected override void Dispose(bool disposing)
     {
         if (disposing)
         {
+            StopBackgroundWork();
             if (pollTimer != null)
             {
-                pollTimer.Stop();
                 pollTimer.Dispose();
             }
+            dialogCts.Dispose();
             if (qrPictureBox != null)
             {
                 DisposeQrImage();
@@ -479,48 +501,41 @@ internal sealed class PairDialog : Form
         }
     }
 
-    void OnPollTimerTick(object sender, EventArgs e)
+    async void OnPollTimerTick(object sender, EventArgs e)
     {
-        if (!pollingEnabled || !isQrMode || isPairing || pollInFlight || runner == null) return;
+        if (!pollingEnabled || !isQrMode || isPairing || pollInFlight || runner == null || dialogCts.IsCancellationRequested) return;
         pollInFlight = true;
 
         string targetService = qrServiceName;
         string targetPassword = qrPassword;
 
-        ThreadPool.QueueUserWorkItem(delegate
+        try
         {
-            List<PairingServiceInfo> services = null;
-            try
-            {
-                services = runner.ListPairingServices();
-            }
-            catch (Exception)
-            {
-                services = new List<PairingServiceInfo>();
-            }
+            List<PairingServiceInfo> services = await runner.ListPairingServicesAsync(dialogCts.Token);
+            if (IsDisposed || Disposing || dialogCts.IsCancellationRequested) return;
+            if (!isQrMode || isPairing) return;
 
             PairingServiceInfo matched = FindMatchingPairingService(services, targetService);
-            if (IsDisposed || Disposing || !IsHandleCreated) return;
-
-            try
+            if (matched != null && string.Equals(targetService, qrServiceName, StringComparison.OrdinalIgnoreCase))
             {
-                BeginInvoke((MethodInvoker)delegate()
-                {
-                    if (IsDisposed || Disposing) return;
-                    pollInFlight = false;
-                    if (!isQrMode || isPairing) return;
-                    if (matched != null && string.Equals(targetService, qrServiceName, StringComparison.OrdinalIgnoreCase))
-                    {
-                        StartQrPairing(matched.Endpoint, targetPassword);
-                    }
-                });
+                StartQrPairing(matched.Endpoint, targetPassword);
             }
-            catch (Exception) { }
-        });
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception)
+        {
+        }
+        finally
+        {
+            pollInFlight = false;
+        }
     }
 
-    void StartQrPairing(string endpoint, string password)
+    async void StartQrPairing(string endpoint, string password)
     {
+        if (isPairing || dialogCts.IsCancellationRequested) return;
         isPairing = true;
         UpdatePollTimerState();
         tabQrBtn.Enabled = false;
@@ -529,49 +544,51 @@ internal sealed class PairDialog : Form
         qrStatusLabel.ForeColor = UiTheme.AccentBlue;
         qrStatusLabel.Text = "已识别设备 " + endpoint + "，正在配对…";
 
-        ThreadPool.QueueUserWorkItem(delegate
+        try
         {
-            string msg;
-            bool ok = false;
-            try
+            (bool ok, string msg) = await runner.PairEndpointAsync(endpoint, password, dialogCts.Token);
+            if (IsDisposed || Disposing || dialogCts.IsCancellationRequested) return;
+            if (ok)
             {
-                ok = runner.PairEndpoint(endpoint, password, out msg);
+                StopBackgroundWork();
+                Paired = true;
+                ResultMessage = "扫码配对成功 (" + endpoint + ")，正在刷新设备列表…";
+                DialogResult = DialogResult.OK;
+                Close();
             }
-            catch (Exception ex)
+            else
             {
-                msg = "配对过程发生异常: " + ex.Message;
+                qrStatusLabel.ForeColor = UiTheme.TextDanger;
+                qrStatusLabel.Text = "配对失败（" + msg + "），请刷新二维码重试或改用配对码";
             }
-            if (IsDisposed || Disposing || !IsHandleCreated) return;
-
-            try
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            if (!IsDisposed && !Disposing)
             {
-                BeginInvoke((MethodInvoker)delegate()
-                {
-                    if (IsDisposed || Disposing) return;
-                    isPairing = false;
-                    tabQrBtn.Enabled = true;
-                    tabCodeBtn.Enabled = true;
-                    refreshQrButton.Enabled = true;
-                    if (ok)
-                    {
-                        Paired = true;
-                        ResultMessage = "扫码配对成功 (" + endpoint + ")，正在刷新设备列表…";
-                        DialogResult = DialogResult.OK;
-                        Close();
-                    }
-                    else
-                    {
-                        qrStatusLabel.ForeColor = UiTheme.TextDanger;
-                        qrStatusLabel.Text = "配对失败（" + msg + "），请刷新二维码重试或改用配对码";
-                    }
-                });
+                qrStatusLabel.ForeColor = UiTheme.TextDanger;
+                qrStatusLabel.Text = "配对失败（" + ex.Message + "），请刷新二维码重试或改用配对码";
             }
-            catch (Exception) { }
-        });
+        }
+        finally
+        {
+            if (!IsDisposed && !Disposing)
+            {
+                isPairing = false;
+                tabQrBtn.Enabled = true;
+                tabCodeBtn.Enabled = true;
+                refreshQrButton.Enabled = true;
+                UpdatePollTimerState();
+            }
+        }
     }
 
-    void OnSubmitCodeClick(object sender, EventArgs e)
+    async void OnSubmitCodeClick(object sender, EventArgs e)
     {
+        if (isPairing || dialogCts.IsCancellationRequested) return;
         string ep = endpointHost.TextValue;
         string code = codeHost.TextValue;
         if (string.IsNullOrWhiteSpace(ep) || string.IsNullOrWhiteSpace(code))
@@ -582,50 +599,52 @@ internal sealed class PairDialog : Form
         }
 
         isPairing = true;
+        UpdatePollTimerState();
         submitButton.Enabled = false;
         tabQrBtn.Enabled = false;
         tabCodeBtn.Enabled = false;
         codeStatusLabel.ForeColor = UiTheme.TextSecondary;
         codeStatusLabel.Text = "正在配对 " + ep + " …";
 
-        ThreadPool.QueueUserWorkItem(delegate
+        try
         {
-            string msg;
-            bool ok = false;
-            try
+            (bool ok, string msg) = await runner.PairEndpointAsync(ep, code, dialogCts.Token);
+            if (IsDisposed || Disposing || dialogCts.IsCancellationRequested) return;
+            if (ok)
             {
-                ok = runner.PairEndpoint(ep, code, out msg);
+                StopBackgroundWork();
+                Paired = true;
+                ResultMessage = "无线配对成功 (" + ep + ")，正在刷新设备列表…";
+                DialogResult = DialogResult.OK;
+                Close();
             }
-            catch (Exception ex)
+            else
             {
-                msg = "配对过程发生异常: " + ex.Message;
+                codeStatusLabel.ForeColor = UiTheme.TextDanger;
+                codeStatusLabel.Text = msg;
             }
-            if (IsDisposed || Disposing || !IsHandleCreated) return;
-            try
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            if (!IsDisposed && !Disposing)
             {
-                BeginInvoke((MethodInvoker)delegate()
-                {
-                    if (IsDisposed || Disposing) return;
-                    isPairing = false;
-                    submitButton.Enabled = true;
-                    tabQrBtn.Enabled = true;
-                    tabCodeBtn.Enabled = true;
-                    if (ok)
-                    {
-                        Paired = true;
-                        ResultMessage = "无线配对成功 (" + ep + ")，正在刷新设备列表…";
-                        DialogResult = DialogResult.OK;
-                        Close();
-                    }
-                    else
-                    {
-                        codeStatusLabel.ForeColor = UiTheme.TextDanger;
-                        codeStatusLabel.Text = msg;
-                    }
-                });
+                codeStatusLabel.ForeColor = UiTheme.TextDanger;
+                codeStatusLabel.Text = "配对过程发生异常: " + ex.Message;
             }
-            catch (Exception) { }
-        });
+        }
+        finally
+        {
+            if (!IsDisposed && !Disposing)
+            {
+                isPairing = false;
+                submitButton.Enabled = true;
+                tabQrBtn.Enabled = true;
+                tabCodeBtn.Enabled = true;
+            }
+        }
     }
 
     internal static PairingServiceInfo FindMatchingPairingService(List<PairingServiceInfo> services, string expectedInstance)

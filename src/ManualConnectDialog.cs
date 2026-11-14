@@ -13,6 +13,7 @@ internal sealed class ManualConnectDialog : Form
     readonly Label statusLabel;
     readonly Button connectButton;
     readonly DeviceRunner runner;
+    readonly CancellationTokenSource dialogCts = new CancellationTokenSource();
 
     bool suppressChangeTracking;
     bool isConnecting;
@@ -47,6 +48,7 @@ internal sealed class ManualConnectDialog : Form
                 Close();
             }
         };
+        FormClosing += delegate { CancelPendingWork(); };
 
         SuspendLayout();
 
@@ -268,9 +270,25 @@ internal sealed class ManualConnectDialog : Form
         return true;
     }
 
-    void OnConnectClick(object sender, EventArgs e)
+    void CancelPendingWork()
     {
-        if (isConnecting) return;
+        try { dialogCts.Cancel(); }
+        catch (Exception) { }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            CancelPendingWork();
+            dialogCts.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+
+    async void OnConnectClick(object sender, EventArgs e)
+    {
+        if (isConnecting || dialogCts.IsCancellationRequested) return;
         string ep;
         if (!TryGetValidatedEndpoint(out ep)) return;
 
@@ -279,41 +297,41 @@ internal sealed class ManualConnectDialog : Form
         statusLabel.ForeColor = UiTheme.TextSecondary;
         statusLabel.Text = "正在连接 " + ep + " …";
 
-        ThreadPool.QueueUserWorkItem(delegate
+        try
         {
-            string msg;
-            bool ok = false;
-            try
+            (bool ok, string msg) = await runner.ConnectEndpointAsync(ep, dialogCts.Token);
+            if (IsDisposed || Disposing || dialogCts.IsCancellationRequested) return;
+            if (ok)
             {
-                ok = runner.ConnectEndpoint(ep, out msg);
+                Connected = true;
+                ResultMessage = "已连接 " + ep + "，正在刷新设备列表…";
+                DialogResult = DialogResult.OK;
+                Close();
             }
-            catch (Exception ex)
+            else
             {
-                msg = "连接过程发生异常: " + ex.Message;
+                statusLabel.ForeColor = UiTheme.TextDanger;
+                statusLabel.Text = msg;
             }
-            if (IsDisposed || Disposing || !IsHandleCreated) return;
-            try
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            if (!IsDisposed && !Disposing)
             {
-                BeginInvoke((MethodInvoker)delegate()
-                {
-                    if (IsDisposed || Disposing) return;
-                    isConnecting = false;
-                    connectButton.Enabled = true;
-                    if (ok)
-                    {
-                        Connected = true;
-                        ResultMessage = "已连接 " + ep + "，正在刷新设备列表…";
-                        DialogResult = DialogResult.OK;
-                        Close();
-                    }
-                    else
-                    {
-                        statusLabel.ForeColor = UiTheme.TextDanger;
-                        statusLabel.Text = msg;
-                    }
-                });
+                statusLabel.ForeColor = UiTheme.TextDanger;
+                statusLabel.Text = "连接过程发生异常: " + ex.Message;
             }
-            catch (Exception) { }
-        });
+        }
+        finally
+        {
+            if (!IsDisposed && !Disposing)
+            {
+                isConnecting = false;
+                connectButton.Enabled = true;
+            }
+        }
     }
 }

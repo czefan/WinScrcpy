@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 internal sealed class MainForm : Form
@@ -33,7 +34,12 @@ internal sealed class MainForm : Form
     readonly List<CheckBox> rowCheckBoxes = new List<CheckBox>();
     readonly List<PairingServiceInfo> lastPairingServices = new List<PairingServiceInfo>();
     Color statusDotColor = UiTheme.StatusGreen;
-    bool isBusy;
+    bool isActionBusy;
+    bool isScanning;
+    bool isBusy { get { return isActionBusy || isScanning; } }
+    readonly CancellationTokenSource formCts = new CancellationTokenSource();
+    CancellationTokenSource activeScanCts;
+    long activeScanId;
     bool syncingCheckBoxes;
     bool inRelayout;
     int lastLayoutWidth = -1;
@@ -121,20 +127,20 @@ internal sealed class MainForm : Form
         disconnectAllItem = new ToolStripMenuItem("断开全部无线连接");
         disconnectAllItem.Click += delegate
         {
-            RunGlobalAdbAction("正在断开无线连接...", delegate
+            RunGlobalAdbAction("正在断开无线连接...", async ct =>
             {
-                CommandOutput r = runner.RunAdb(new string[] { "disconnect" }, 4000);
+                CommandOutput r = await runner.RunAdbAsync(new string[] { "disconnect" }, 4000, ct);
                 return r.Success ? null : r.GetFailureSummary("断开无线连接失败");
             });
         };
         restartAdbItem = new ToolStripMenuItem("重启 ADB 服务");
         restartAdbItem.Click += delegate
         {
-            RunGlobalAdbAction("正在重启 ADB 服务...", delegate
+            RunGlobalAdbAction("正在重启 ADB 服务...", async ct =>
             {
-                CommandOutput kill = runner.RunAdb(new string[] { "kill-server" }, 4000);
+                CommandOutput kill = await runner.RunAdbAsync(new string[] { "kill-server" }, 4000, ct);
                 if (!kill.Success) return kill.GetFailureSummary("停止 ADB 服务失败");
-                CommandOutput start = runner.RunAdb(new string[] { "start-server" }, 6000);
+                CommandOutput start = await runner.RunAdbAsync(new string[] { "start-server" }, 6000, ct);
                 return start.Success ? null : start.GetFailureSummary("启动 ADB 服务失败");
             });
         };
@@ -216,6 +222,7 @@ internal sealed class MainForm : Form
         Controls.Add(statusBorder);
         Controls.Add(statusBar);
 
+        FormClosing += delegate { CancelAllBackgroundWork(); };
         if (autoScanOnShow)
         {
             Shown += delegate { StartScan(); };
@@ -224,9 +231,14 @@ internal sealed class MainForm : Form
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing && moreMenu != null)
+        if (disposing)
         {
-            moreMenu.Dispose();
+            CancelAllBackgroundWork();
+            formCts.Dispose();
+            if (moreMenu != null)
+            {
+                moreMenu.Dispose();
+            }
         }
         base.Dispose(disposing);
     }
@@ -266,21 +278,23 @@ internal sealed class MainForm : Form
         moreMenu.Show(moreBtn, pt);
     }
 
-    void SetBusy(bool busy, string status, Color? dotColor)
+    void SetUiBusy(bool actionBusy, bool scanning, string status, Color? dotColor)
     {
-        isBusy = busy;
-        refreshBtn.Enabled = !busy;
-        if (!busy) refreshBtn.Text = "扫描 (F5)";
-        pairBtn.Enabled = !busy;
-        manualBtn.Enabled = !busy;
-        moreBtn.Enabled = !busy;
-        manageSavedItem.Enabled = !busy;
-        disconnectAllItem.Enabled = !busy;
-        restartAdbItem.Enabled = !busy;
-        connectSelectedBtn.Enabled = !busy;
+        isActionBusy = actionBusy;
+        isScanning = scanning;
+        bool blocksActions = actionBusy || scanning;
+        refreshBtn.Enabled = !actionBusy;
+        refreshBtn.Text = scanning ? "扫描中…" : "扫描 (F5)";
+        pairBtn.Enabled = !blocksActions;
+        manualBtn.Enabled = !blocksActions;
+        moreBtn.Enabled = !blocksActions;
+        manageSavedItem.Enabled = !blocksActions;
+        disconnectAllItem.Enabled = !blocksActions;
+        restartAdbItem.Enabled = !blocksActions;
+        connectSelectedBtn.Enabled = !blocksActions;
         if (selectAllCheck != null)
         {
-            selectAllCheck.Enabled = !busy && HasAnyConnectableRow();
+            selectAllCheck.Enabled = !blocksActions && HasAnyConnectableRow();
         }
         if (status != null) statusLabel.Text = status;
         if (dotColor.HasValue)
@@ -325,81 +339,159 @@ internal sealed class MainForm : Form
         get { return isBusy; }
     }
 
-    internal void RunBusyActionForTest(string statusText, Action work, string failureContext = "操作失败")
+    internal string StatusTextForTest
     {
-        SetBusy(true, statusText, UiTheme.AccentBlue);
-        RunAsync(work, failureContext);
+        get { return statusLabel.Text; }
     }
 
-    void RunAsync(Action work, string failureContext = "操作失败")
+    internal int RowCountForTest
     {
-        ThreadPool.QueueUserWorkItem(delegate
-        {
-            try
-            {
-                work();
-            }
-            catch (OperationCanceledException)
-            {
-                SafeUi(delegate()
-                {
-                    SetBusy(false, "操作已取消", UiTheme.StatusOrange);
-                });
-            }
-            catch (Exception ex)
-            {
-                SafeUi(delegate()
-                {
-                    SetBusy(false, failureContext + ": " + ex.Message, UiTheme.StatusRed);
-                });
-            }
-        });
+        get { return rowCheckBoxes.Count; }
     }
 
-    void SafeUi(Action action)
+    internal async void RunBusyActionForTest(string statusText, Action work, string failureContext = "操作失败")
     {
-        if (IsDisposed || Disposing || !IsHandleCreated) return;
+        SetUiBusy(true, false, statusText, UiTheme.AccentBlue);
+        CancellationToken ct = formCts.Token;
         try
         {
-            Invoke((MethodInvoker)delegate()
+            await Task.Run(work, ct);
+            if (!IsDisposed && !Disposing)
             {
-                if (IsDisposed || Disposing) return;
-                try
-                {
-                    action();
-                }
-                catch (Exception ex)
-                {
-                    if (isBusy)
-                    {
-                        SetBusy(false, "界面更新失败: " + ex.Message, UiTheme.StatusRed);
-                    }
-                }
-            });
+                SetUiBusy(false, false, "准备就绪", UiTheme.StatusGreen);
+            }
         }
-        catch (Exception) { }
+        catch (OperationCanceledException)
+        {
+            if (!IsDisposed && !Disposing)
+            {
+                SetUiBusy(false, false, "操作已取消", UiTheme.StatusOrange);
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!IsDisposed && !Disposing)
+            {
+                SetUiBusy(false, false, failureContext + ": " + ex.Message, UiTheme.StatusRed);
+            }
+        }
+    }
+
+    void CancelActiveScan()
+    {
+        CancellationTokenSource old = activeScanCts;
+        activeScanCts = null;
+        if (old != null)
+        {
+            try { old.Cancel(); }
+            catch (ObjectDisposedException) { }
+        }
+    }
+
+    void InvalidateActiveScan()
+    {
+        unchecked { activeScanId++; }
+        CancelActiveScan();
+    }
+
+    void CancelAllBackgroundWork()
+    {
+        InvalidateActiveScan();
+        try { formCts.Cancel(); }
+        catch (ObjectDisposedException) { }
     }
 
     void StartScan(string customBusyText = null)
     {
-        if (isBusy) return;
+        var _ = ExecuteScanCoreAsync((onStage1, ct) => runner.ScanAsync(onStage1, ct), customBusyText);
+    }
+
+    internal async Task ExecuteScanCoreAsync(
+        Func<Action<ScanResult>, CancellationToken, Task<ScanResult>> scanFunc,
+        string customBusyText = null)
+    {
+        if (isActionBusy || IsDisposed || Disposing) return;
+        CancelActiveScan();
+        long myScanId = ++activeScanId;
+        CancellationTokenSource scanCts = CancellationTokenSource.CreateLinkedTokenSource(formCts.Token);
+        activeScanCts = scanCts;
+        CancellationToken ct = scanCts.Token;
+        bool scanFinished = false;
+
         ReloadConfig();
-        refreshBtn.Text = "扫描中…";
         string busyText = string.IsNullOrEmpty(customBusyText)
             ? "正在扫描已连接设备与 mDNS 无线调试服务…"
             : customBusyText;
-        SetBusy(true, busyText, UiTheme.AccentBlue);
+        SetUiBusy(false, true, busyText, UiTheme.AccentBlue);
 
-        RunAsync(delegate()
+        try
         {
-            ScanResult result = runner.Scan();
-            SafeUi(delegate()
+            ScanResult result = await scanFunc(stage1 =>
             {
-                ApplyScanResult(result);
-                UpdateStatusTone(result);
-                SetBusy(false, BuildScanSummary(result), null);
-            });
-        }, "扫描设备失败");
+                if (Volatile.Read(ref scanFinished) || IsDisposed || Disposing || !IsHandleCreated) return;
+                Action applyStage1 = delegate
+                {
+                    if (Volatile.Read(ref scanFinished) || IsDisposed || Disposing || myScanId != activeScanId || ct.IsCancellationRequested) return;
+                    if (stage1 != null && (stage1.Devices.Count > 0 || !string.IsNullOrEmpty(stage1.Warning)))
+                    {
+                        ApplyScanResult(stage1);
+                        string stageText = stage1.Devices.Count > 0
+                            ? string.Format("已发现 {0} 台已连接设备，正在探测无线设备…", stage1.Devices.Count)
+                            : stage1.Warning;
+                        SetUiBusy(false, true, stageText, string.IsNullOrEmpty(stage1.Warning) ? UiTheme.AccentBlue : UiTheme.StatusOrange);
+                    }
+                    else
+                    {
+                        SetUiBusy(false, true, "已检查有线连接，正在探测无线设备…", UiTheme.AccentBlue);
+                    }
+                };
+                if (InvokeRequired)
+                {
+                    try { BeginInvoke(applyStage1); }
+                    catch (ObjectDisposedException) { }
+                    catch (InvalidOperationException) { }
+                }
+                else
+                {
+                    applyStage1();
+                }
+            }, ct);
+
+            Volatile.Write(ref scanFinished, true);
+            if (IsDisposed || Disposing || myScanId != activeScanId || ct.IsCancellationRequested) return;
+            ApplyScanResult(result);
+            UpdateStatusTone(result);
+            SetUiBusy(false, false, BuildScanSummary(result), null);
+        }
+        catch (OperationCanceledException)
+        {
+            Volatile.Write(ref scanFinished, true);
+            if (!IsDisposed && !Disposing && myScanId == activeScanId && !formCts.IsCancellationRequested)
+            {
+                SetUiBusy(false, false, "扫描已取消", UiTheme.StatusOrange);
+            }
+        }
+        catch (Exception ex)
+        {
+            Volatile.Write(ref scanFinished, true);
+            if (!IsDisposed && !Disposing && myScanId == activeScanId)
+            {
+                SetUiBusy(false, false, "扫描设备失败: " + ex.Message, UiTheme.StatusRed);
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref scanFinished, true);
+            if (ReferenceEquals(activeScanCts, scanCts))
+            {
+                activeScanCts = null;
+            }
+            if (!IsDisposed && !Disposing && myScanId == activeScanId && isScanning)
+            {
+                SetUiBusy(false, false, null, null);
+            }
+            scanCts.Dispose();
+        }
     }
 
     static string BuildScanSummary(ScanResult result)
@@ -420,28 +512,50 @@ internal sealed class MainForm : Form
         return string.Format("共发现 {0} 个设备通道", result.Devices.Count);
     }
 
-    void RunGlobalAdbAction(string statusText, Func<string> work)
+    async void RunGlobalAdbAction(string statusText, Func<CancellationToken, Task<string>> work)
     {
         if (isBusy) return;
-        SetBusy(true, statusText, UiTheme.AccentBlue);
-        RunAsync(delegate()
+        InvalidateActiveScan();
+        SetUiBusy(true, false, statusText, UiTheme.AccentBlue);
+        CancellationToken ct = formCts.Token;
+
+        try
         {
-            string actionErr = work();
-            ScanResult scan = runner.Scan();
-            SafeUi(delegate()
+            string actionErr = await work(ct);
+            ScanResult scan = await runner.ScanAsync(null, ct);
+            if (IsDisposed || Disposing) return;
+            ApplyScanResult(scan);
+            if (!string.IsNullOrEmpty(actionErr))
             {
-                ApplyScanResult(scan);
-                if (!string.IsNullOrEmpty(actionErr))
-                {
-                    SetBusy(false, actionErr, UiTheme.StatusRed);
-                }
-                else
-                {
-                    UpdateStatusTone(scan);
-                    SetBusy(false, BuildScanSummary(scan), null);
-                }
-            });
-        }, "执行 ADB 操作失败");
+                SetUiBusy(false, false, actionErr, UiTheme.StatusRed);
+            }
+            else
+            {
+                UpdateStatusTone(scan);
+                SetUiBusy(false, false, BuildScanSummary(scan), null);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (!IsDisposed && !Disposing)
+            {
+                SetUiBusy(false, false, "操作已取消", UiTheme.StatusOrange);
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!IsDisposed && !Disposing)
+            {
+                SetUiBusy(false, false, "执行 ADB 操作失败: " + ex.Message, UiTheme.StatusRed);
+            }
+        }
+        finally
+        {
+            if (!IsDisposed && !Disposing && isActionBusy)
+            {
+                SetUiBusy(false, false, null, null);
+            }
+        }
     }
 
     void OnOpenPairDialog(object sender, EventArgs e)
@@ -1089,45 +1203,66 @@ internal sealed class MainForm : Form
         ExecuteConnectBatch(selected);
     }
 
-    void ExecuteWirelessAction(DeviceItem item, string displayTitle, bool isDisconnecting)
+    async void ExecuteWirelessAction(DeviceItem item, string displayTitle, bool isDisconnecting)
     {
         if (isBusy) return;
-        SetBusy(true, (isDisconnecting ? "正在断开 [" : "正在连接 [") + displayTitle + "] 无线 ADB…", UiTheme.AccentBlue);
+        InvalidateActiveScan();
+        SetUiBusy(true, false, (isDisconnecting ? "正在断开 [" : "正在连接 [") + displayTitle + "] 无线 ADB…", UiTheme.AccentBlue);
+        CancellationToken ct = formCts.Token;
 
-        RunAsync(delegate()
+        try
         {
             string detail;
             bool ok;
             if (isDisconnecting)
             {
-                string err;
-                ok = runner.DisconnectDevice(item, out err);
-                detail = ok ? ("已断开 [" + displayTitle + "] 无线连接") : ("断开失败: " + err);
+                var res = await runner.DisconnectDeviceAsync(item, ct);
+                ok = res.ok;
+                detail = ok ? ("已断开 [" + displayTitle + "] 无线连接") : ("断开失败: " + res.error);
             }
             else
             {
-                string activeSerial;
-                string err;
-                ok = runner.EnsureConnected(item, out activeSerial, out err);
-                detail = ok ? string.Format("已连接 [{0}] ({1})", displayTitle, activeSerial) : ("连接失败: " + err);
+                var res = await runner.EnsureConnectedAsync(item, ct);
+                ok = res.ok;
+                detail = ok ? string.Format("已连接 [{0}] ({1})", displayTitle, res.activeSerial) : ("连接失败: " + res.error);
             }
 
-            ScanResult refreshed = runner.Scan();
-            SafeUi(delegate()
+            ScanResult refreshed = await runner.ScanAsync(null, ct);
+            if (IsDisposed || Disposing) return;
+            ApplyScanResult(refreshed);
+            SetUiBusy(false, false, detail, ok ? UiTheme.StatusGreen : UiTheme.StatusRed);
+        }
+        catch (OperationCanceledException)
+        {
+            if (!IsDisposed && !Disposing)
             {
-                ApplyScanResult(refreshed);
-                Color tone = ok ? UiTheme.StatusGreen : UiTheme.StatusRed;
-                SetBusy(false, detail, tone);
-            });
-        }, "无线连接操作失败");
+                SetUiBusy(false, false, "操作已取消", UiTheme.StatusOrange);
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!IsDisposed && !Disposing)
+            {
+                SetUiBusy(false, false, "无线连接操作失败: " + ex.Message, UiTheme.StatusRed);
+            }
+        }
+        finally
+        {
+            if (!IsDisposed && !Disposing && isActionBusy)
+            {
+                SetUiBusy(false, false, null, null);
+            }
+        }
     }
 
-    void ExecuteConnectBatch(List<DeviceItem> targets)
+    async void ExecuteConnectBatch(List<DeviceItem> targets)
     {
         if (isBusy) return;
-        SetBusy(true, string.Format("正在连接并启动投屏 ({0} 台设备)…", targets.Count), UiTheme.AccentBlue);
+        InvalidateActiveScan();
+        SetUiBusy(true, false, string.Format("正在连接并启动投屏 ({0} 台设备)…", targets.Count), UiTheme.AccentBlue);
+        CancellationToken ct = formCts.Token;
 
-        RunAsync(delegate()
+        try
         {
             int count = targets.Count;
             string[] readyLines = new string[count];
@@ -1136,65 +1271,17 @@ internal sealed class MainForm : Form
 
             int maxParallel = Math.Min(3, Math.Max(1, count));
             using (SemaphoreSlim gate = new SemaphoreSlim(maxParallel, maxParallel))
-            using (CountdownEvent done = new CountdownEvent(count))
             {
+                List<Task> tasks = new List<Task>(count);
                 for (int i = 0; i < count; i++)
                 {
                     int idx = i;
-                    ThreadPool.QueueUserWorkItem(delegate
-                    {
-                        bool entered = false;
-                        try
-                        {
-                            gate.Wait();
-                            entered = true;
-
-                            DeviceItem item = targets[idx];
-                            ResolvedDeviceConfig resolved = ConfigManager.Resolve(config, item);
-                            string display = GetDisplayTitle(item, resolved);
-
-                            string activeSerial;
-                            string err;
-                            if (!runner.EnsureConnected(item, out activeSerial, out err))
-                            {
-                                failureLines[idx] = display + ": " + err;
-                                return;
-                            }
-
-                            string badge = item.Channel == ChannelKind.Usb ? item.BadgeText : "无线已连";
-                            string title = display + " [" + badge + "]";
-                            ScrcpyLaunchResult res = runner.Scrcpy.Launch(activeSerial, title, resolved.Args);
-                            if (res.Outcome == ScrcpyLaunchOutcome.StreamReady)
-                            {
-                                readyLines[idx] = display + " (" + activeSerial + ")";
-                            }
-                            else if (res.Outcome == ScrcpyLaunchOutcome.ProcessAlive)
-                            {
-                                string aliveDetail = display + " (" + activeSerial + "): " + res.ErrorMessage;
-                                if (!string.IsNullOrWhiteSpace(res.LogFilePath))
-                                {
-                                    aliveDetail += "\n  日志: " + res.LogFilePath;
-                                }
-                                aliveLines[idx] = aliveDetail;
-                            }
-                            else
-                            {
-                                failureLines[idx] = display + ": " + res.ErrorMessage;
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            failureLines[idx] = "设备启动异常: " + ex.Message;
-                        }
-                        finally
-                        {
-                            if (entered) gate.Release();
-                            done.Signal();
-                        }
-                    });
+                    tasks.Add(RunSingleConnectAsync(targets[idx], idx, gate, readyLines, aliveLines, failureLines, ct));
                 }
-                done.Wait();
+                await Task.WhenAll(tasks);
             }
+
+            if (ct.IsCancellationRequested || IsDisposed || Disposing) return;
 
             List<string> readyList = CollectNonEmpty(readyLines);
             List<string> aliveList = CollectNonEmpty(aliveLines);
@@ -1203,27 +1290,110 @@ internal sealed class MainForm : Form
             // 普通成功流程保持安静（哪怕部分处于未确认画面但进程已启动），仅在存在失败时刷新界面并展开诊断详情。
             if (failureList.Count == 0)
             {
-                SafeUi(delegate() { Close(); });
+                Close();
                 return;
             }
 
-            ScanResult refreshed = runner.Scan();
-            SafeUi(delegate()
+            ScanResult refreshed = await runner.ScanAsync(null, ct);
+            if (IsDisposed || Disposing) return;
+            ApplyScanResult(refreshed);
+
+            List<string> summaryParts = new List<string>();
+            if (readyList.Count > 0) summaryParts.Add(string.Format("投屏就绪 {0} 台", readyList.Count));
+            if (aliveList.Count > 0) summaryParts.Add(string.Format("已启动(未确认就绪) {0} 台", aliveList.Count));
+            summaryParts.Add(string.Format("失败 {0} 台", failureList.Count));
+            string summary = string.Join("，", summaryParts.ToArray());
+
+            string detail = BuildBatchOutcomeDetail(readyList, aliveList, failureList);
+            SetUiBusy(false, false, summary, UiTheme.StatusRed);
+            bool hasAnyStarted = readyList.Count > 0 || aliveList.Count > 0;
+            MessageBox.Show(this, detail, hasAnyStarted ? "部分设备启动失败" : "设备启动失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        catch (OperationCanceledException)
+        {
+            if (!IsDisposed && !Disposing)
             {
-                ApplyScanResult(refreshed);
+                SetUiBusy(false, false, "启动投屏已取消", UiTheme.StatusOrange);
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!IsDisposed && !Disposing)
+            {
+                SetUiBusy(false, false, "启动投屏失败: " + ex.Message, UiTheme.StatusRed);
+            }
+        }
+        finally
+        {
+            if (!IsDisposed && !Disposing && isActionBusy)
+            {
+                SetUiBusy(false, false, null, null);
+            }
+        }
+    }
 
-                List<string> summaryParts = new List<string>();
-                if (readyList.Count > 0) summaryParts.Add(string.Format("投屏就绪 {0} 台", readyList.Count));
-                if (aliveList.Count > 0) summaryParts.Add(string.Format("已启动(未确认就绪) {0} 台", aliveList.Count));
-                summaryParts.Add(string.Format("失败 {0} 台", failureList.Count));
-                string summary = string.Join("，", summaryParts.ToArray());
+    async Task RunSingleConnectAsync(
+        DeviceItem item,
+        int index,
+        SemaphoreSlim gate,
+        string[] readyLines,
+        string[] aliveLines,
+        string[] failureLines,
+        CancellationToken ct)
+    {
+        bool entered = false;
+        try
+        {
+            await gate.WaitAsync(ct);
+            entered = true;
 
-                string detail = BuildBatchOutcomeDetail(readyList, aliveList, failureList);
-                SetBusy(false, summary, UiTheme.StatusRed);
-                bool hasAnyStarted = readyList.Count > 0 || aliveList.Count > 0;
-                MessageBox.Show(this, detail, hasAnyStarted ? "部分设备启动失败" : "设备启动失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            });
-        }, "启动投屏失败");
+            ResolvedDeviceConfig resolved = ConfigManager.Resolve(config, item);
+            string display = GetDisplayTitle(item, resolved);
+
+            var conn = await runner.EnsureConnectedAsync(item, ct);
+            if (!conn.ok)
+            {
+                failureLines[index] = display + ": " + conn.error;
+                return;
+            }
+
+            string badge = item.Channel == ChannelKind.Usb ? item.BadgeText : "无线已连";
+            string title = display + " [" + badge + "]";
+            ScrcpyLaunchResult res = await Task.Run(delegate
+            {
+                return runner.Scrcpy.Launch(conn.activeSerial, title, resolved.Args, cancellationToken: ct);
+            }, ct);
+
+            if (res.Outcome == ScrcpyLaunchOutcome.StreamReady)
+            {
+                readyLines[index] = display + " (" + conn.activeSerial + ")";
+            }
+            else if (res.Outcome == ScrcpyLaunchOutcome.ProcessAlive)
+            {
+                string aliveDetail = display + " (" + conn.activeSerial + "): " + res.ErrorMessage;
+                if (!string.IsNullOrWhiteSpace(res.LogFilePath))
+                {
+                    aliveDetail += "\n  日志: " + res.LogFilePath;
+                }
+                aliveLines[index] = aliveDetail;
+            }
+            else
+            {
+                failureLines[index] = display + ": " + res.ErrorMessage;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            failureLines[index] = "已取消启动";
+        }
+        catch (Exception ex)
+        {
+            failureLines[index] = "设备启动异常: " + ex.Message;
+        }
+        finally
+        {
+            if (entered) gate.Release();
+        }
     }
 
     static List<string> CollectNonEmpty(string[] items)
@@ -1254,67 +1424,80 @@ internal sealed class MainForm : Form
         return string.Join("\n\n", sections.ToArray());
     }
 
-    void ExecuteScreenshot(DeviceItem item, string displayTitle)
+    async void ExecuteScreenshot(DeviceItem item, string displayTitle)
     {
         if (isBusy) return;
+        InvalidateActiveScan();
         bool wasPending = IsPendingWireless(item.Channel);
-        SetBusy(true, "正在截取 [" + displayTitle + "] 屏幕…", UiTheme.AccentBlue);
+        SetUiBusy(true, false, "正在截取 [" + displayTitle + "] 屏幕…", UiTheme.AccentBlue);
+        CancellationToken ct = formCts.Token;
+        Bitmap bmp = null;
 
-        RunAsync(delegate()
+        try
         {
-            string activeSerial;
-            string err;
-            if (!runner.EnsureConnected(item, out activeSerial, out err))
+            var conn = await runner.EnsureConnectedAsync(item, ct);
+            if (!conn.ok)
             {
-                ReportScreenshotFailure(displayTitle, err);
-                return;
-            }
-
-            Bitmap bmp;
-            if (!runner.CaptureScreenshot(activeSerial, out bmp, out err))
-            {
-                ReportScreenshotFailure(displayTitle, err);
-                return;
-            }
-
-            ScanResult refreshed = null;
-            try
-            {
-                refreshed = wasPending ? runner.Scan() : null;
-            }
-            catch
-            {
-                bmp.Dispose();
-                throw;
-            }
-
-            if (IsDisposed || Disposing || !IsHandleCreated)
-            {
-                bmp.Dispose();
-                return;
-            }
-
-            bool handledOnUi = false;
-            SafeUi(delegate()
-            {
-                handledOnUi = true;
-                int w = bmp.Width;
-                int h = bmp.Height;
-                string clipErr;
-                bool copied = TrySetClipboardImage(bmp, out clipErr);
-                bmp.Dispose();
-                if (refreshed != null) ApplyScanResult(refreshed);
-                if (copied)
+                if (!IsDisposed && !Disposing)
                 {
-                    SetBusy(false, string.Format("已复制 [{0}] 截图到剪贴板 ({1}x{2})", displayTitle, w, h), UiTheme.StatusGreen);
+                    SetUiBusy(false, false, string.Format("[{0}] 截屏失败: {1}", displayTitle, conn.error), UiTheme.StatusRed);
                 }
-                else
+                return;
+            }
+
+            var shot = await runner.CaptureScreenshotAsync(conn.activeSerial, ct);
+            if (!shot.ok || shot.bitmap == null)
+            {
+                if (!IsDisposed && !Disposing)
                 {
-                    SetBusy(false, string.Format("[{0}] 复制截图到剪贴板失败: {1}", displayTitle, clipErr), UiTheme.StatusRed);
+                    SetUiBusy(false, false, string.Format("[{0}] 截屏失败: {1}", displayTitle, shot.error), UiTheme.StatusRed);
                 }
-            });
-            if (!handledOnUi) bmp.Dispose();
-        }, "截屏失败");
+                return;
+            }
+            bmp = shot.bitmap;
+
+            ScanResult refreshed = wasPending ? await runner.ScanAsync(null, ct) : null;
+            if (IsDisposed || Disposing || !IsHandleCreated) return;
+
+            int w = bmp.Width;
+            int h = bmp.Height;
+            string clipErr;
+            bool copied = TrySetClipboardImage(bmp, out clipErr);
+            bmp.Dispose();
+            bmp = null;
+
+            if (refreshed != null) ApplyScanResult(refreshed);
+            if (copied)
+            {
+                SetUiBusy(false, false, string.Format("已复制 [{0}] 截图到剪贴板 ({1}x{2})", displayTitle, w, h), UiTheme.StatusGreen);
+            }
+            else
+            {
+                SetUiBusy(false, false, string.Format("[{0}] 复制截图到剪贴板失败: {1}", displayTitle, clipErr), UiTheme.StatusRed);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (!IsDisposed && !Disposing)
+            {
+                SetUiBusy(false, false, "截屏已取消", UiTheme.StatusOrange);
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!IsDisposed && !Disposing)
+            {
+                SetUiBusy(false, false, "截屏失败: " + ex.Message, UiTheme.StatusRed);
+            }
+        }
+        finally
+        {
+            if (bmp != null) bmp.Dispose();
+            if (!IsDisposed && !Disposing && isActionBusy)
+            {
+                SetUiBusy(false, false, null, null);
+            }
+        }
     }
 
     static bool TrySetClipboardImage(Bitmap bmp, out string error)
@@ -1336,52 +1519,66 @@ internal sealed class MainForm : Form
         return false;
     }
 
-    void ReportScreenshotFailure(string displayTitle, string err)
-    {
-        SafeUi(delegate()
-        {
-            SetBusy(false, string.Format("[{0}] 截屏失败: {1}", displayTitle, err), UiTheme.StatusRed);
-        });
-    }
-
-    void ExecuteOpenTerminal(DeviceItem item, string displayTitle, TerminalMode mode)
+    async void ExecuteOpenTerminal(DeviceItem item, string displayTitle, TerminalMode mode)
     {
         if (isBusy || !item.CanConnect) return;
+        InvalidateActiveScan();
         bool wasPending = IsPendingWireless(item.Channel);
         string modeName = mode == TerminalMode.AdbShell ? "ADB Shell" : "本地 ADB 终端";
-        SetBusy(true, "正在打开 [" + displayTitle + "] " + modeName + "…", UiTheme.AccentBlue);
+        SetUiBusy(true, false, "正在打开 [" + displayTitle + "] " + modeName + "…", UiTheme.AccentBlue);
+        CancellationToken ct = formCts.Token;
 
-        RunAsync(delegate()
+        try
         {
-            string activeSerial;
-            string err;
-            if (!runner.EnsureConnected(item, out activeSerial, out err))
+            var conn = await runner.EnsureConnectedAsync(item, ct);
+            if (!conn.ok)
             {
-                SafeUi(delegate()
+                if (!IsDisposed && !Disposing)
                 {
-                    SetBusy(false, string.Format("[{0}] 打开{1}失败: {2}", displayTitle, modeName, err), UiTheme.StatusRed);
-                });
+                    SetUiBusy(false, false, string.Format("[{0}] 打开{1}失败: {2}", displayTitle, modeName, conn.error), UiTheme.StatusRed);
+                }
                 return;
             }
 
-            string launchedWith;
-            if (!runner.OpenDeviceTerminal(activeSerial, displayTitle, mode, out launchedWith, out err))
+            var termRes = await Task.Run(delegate
             {
-                ScanResult failRefresh = wasPending ? runner.Scan() : null;
-                SafeUi(delegate()
-                {
-                    if (failRefresh != null) ApplyScanResult(failRefresh);
-                    SetBusy(false, string.Format("[{0}] 打开{1}失败: {2}", displayTitle, modeName, err), UiTheme.StatusRed);
-                });
+                string launchedWith;
+                string err;
+                bool ok = runner.OpenDeviceTerminal(conn.activeSerial, displayTitle, mode, out launchedWith, out err);
+                return (ok, launchedWith, err);
+            }, ct);
+
+            ScanResult refreshed = wasPending ? await runner.ScanAsync(null, ct) : null;
+            if (IsDisposed || Disposing) return;
+            if (refreshed != null) ApplyScanResult(refreshed);
+
+            if (!termRes.ok)
+            {
+                SetUiBusy(false, false, string.Format("[{0}] 打开{1}失败: {2}", displayTitle, modeName, termRes.err), UiTheme.StatusRed);
                 return;
             }
-
-            ScanResult refreshed = wasPending ? runner.Scan() : null;
-            SafeUi(delegate()
+            SetUiBusy(false, false, string.Format("已打开 [{0}] {1} ({2})", displayTitle, modeName, termRes.launchedWith), UiTheme.StatusGreen);
+        }
+        catch (OperationCanceledException)
+        {
+            if (!IsDisposed && !Disposing)
             {
-                if (refreshed != null) ApplyScanResult(refreshed);
-                SetBusy(false, string.Format("已打开 [{0}] {1} ({2})", displayTitle, modeName, launchedWith), UiTheme.StatusGreen);
-            });
-        }, "打开终端失败");
+                SetUiBusy(false, false, "打开终端已取消", UiTheme.StatusOrange);
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!IsDisposed && !Disposing)
+            {
+                SetUiBusy(false, false, "打开终端失败: " + ex.Message, UiTheme.StatusRed);
+            }
+        }
+        finally
+        {
+            if (!IsDisposed && !Disposing && isActionBusy)
+            {
+                SetUiBusy(false, false, null, null);
+            }
+        }
     }
 }

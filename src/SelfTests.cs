@@ -3,8 +3,11 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 internal static class SelfTests
@@ -37,6 +40,7 @@ internal static class SelfTests
             TestScrcpyLogLifecycleAndLaunchJudgment();
             TestUiLayoutNoClipping();
             TestMainFormBusyRecovery();
+            TestAsyncScanAndProbeConcurrency();
             Console.WriteLine("SELFTEST PASS");
             return 0;
         }
@@ -1502,5 +1506,267 @@ internal static class SelfTests
             try { Directory.Delete(root, true); }
             catch (Exception) { }
         }
+    }
+
+    static bool PumpUntil(Func<bool> predicate, int timeoutMs)
+    {
+        Stopwatch sw = Stopwatch.StartNew();
+        while (!predicate() && sw.ElapsedMilliseconds < timeoutMs)
+        {
+            Application.DoEvents();
+            Thread.Sleep(15);
+        }
+        Application.DoEvents();
+        return predicate();
+    }
+
+    static void TestAsyncScanAndProbeConcurrency()
+    {
+        // 4a. Async TCP probe concurrency cap & no 1-thread-per-endpoint explosion.
+        List<string> endpoints = new List<string>(50);
+        for (int i = 1; i <= 50; i++)
+        {
+            endpoints.Add("192.168.99." + i + ":5555");
+        }
+        int active = 0;
+        int maxActive = 0;
+        int completedCount = 0;
+        int threadsBefore = Process.GetCurrentProcess().Threads.Count;
+
+        Dictionary<string, bool> probeResults = Task.Run(delegate
+        {
+            return DeviceRunner.ProbeEndpointsAsync(
+                endpoints,
+                1000,
+                8,
+                CancellationToken.None,
+                async (ep, timeoutMs, ct) =>
+                {
+                    int cur = Interlocked.Increment(ref active);
+                    while (true)
+                    {
+                        int prevMax = Volatile.Read(ref maxActive);
+                        if (cur <= prevMax || Interlocked.CompareExchange(ref maxActive, cur, prevMax) == prevMax) break;
+                    }
+                    try
+                    {
+                        await Task.Delay(25, ct).ConfigureAwait(false);
+                        Interlocked.Increment(ref completedCount);
+                        return ep.EndsWith("1:5555");
+                    }
+                    finally
+                    {
+                        Interlocked.Decrement(ref active);
+                    }
+                });
+        }).GetAwaiter().GetResult();
+
+        int threadsAfter = Process.GetCurrentProcess().Threads.Count;
+        Assert(completedCount == 50 && probeResults.Count == 50,
+            "all 50 async probes must complete cleanly, got: " + completedCount);
+        Assert(maxActive >= 2 && maxActive <= 8,
+            "probe concurrency must be parallel and bounded <= 8, got maxActive=" + maxActive);
+        Assert((threadsAfter - threadsBefore) < 35,
+            "async I/O probing must not spawn thread-per-endpoint: before=" + threadsBefore + ", after=" + threadsAfter);
+        Assert(probeResults["192.168.99.1:5555"] && !probeResults["192.168.99.2:5555"],
+            "probe result mapping must preserve per-endpoint reachability");
+
+        // 4b. Async probe respects CancellationToken immediately.
+        using (CancellationTokenSource cancelProbeCts = new CancellationTokenSource())
+        {
+            cancelProbeCts.CancelAfter(40);
+            bool threwCanceled = false;
+            try
+            {
+                Task.Run(delegate
+                {
+                    return DeviceRunner.ProbeEndpointsAsync(
+                        endpoints,
+                        2000,
+                        8,
+                        cancelProbeCts.Token,
+                        async (ep, timeoutMs, ct) =>
+                        {
+                            await Task.Delay(1500, ct).ConfigureAwait(false);
+                            return true;
+                        });
+                }).GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                threwCanceled = true;
+            }
+            Assert(threwCanceled, "ProbeEndpointsAsync must honor CancellationToken promptly");
+        }
+
+        // 4c. Real TCP loopback probe: listening port returns true, closed port returns false.
+        TcpListener listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        try
+        {
+            bool openOk = Task.Run(() => DeviceRunner.ProbeTcpEndpointAsync("127.0.0.1:" + port, 800, CancellationToken.None))
+                .GetAwaiter().GetResult();
+            Assert(openOk, "ProbeTcpEndpointAsync should return true for listening loopback port");
+        }
+        finally
+        {
+            listener.Stop();
+        }
+        bool closedOk = Task.Run(() => DeviceRunner.ProbeTcpEndpointAsync("127.0.0.1:" + port, 300, CancellationToken.None))
+            .GetAwaiter().GetResult();
+        Assert(!closedOk, "ProbeTcpEndpointAsync should return false for stopped port");
+
+        // 4d. MainForm two-stage scan: Stage 1 USB appears while Stage 2 is waiting, and scan #2 discards stale scan #1.
+        string tempCfg = Path.Combine(Path.GetTempPath(), "WinScrcpy-scan-test-" + Guid.NewGuid().ToString("N") + ".json");
+        ConfigManager manager = new ConfigManager(tempCfg);
+        using (MainForm form = new MainForm(manager, new AppConfig(), null, false))
+        {
+            IntPtr handle = form.Handle;
+            Assert(handle != IntPtr.Zero, "MainForm handle should be created for staged scan test");
+
+            TaskCompletionSource<bool> releaseScan1 = new TaskCompletionSource<bool>();
+            bool scan1TokenCanceled = false;
+            Action<ScanResult> capturedScan1Stage1 = null;
+
+            ScanResult scan1UsbOnly = AdbScanner.ParseAndMerge(
+                "List of devices attached\nUSB_STAGE1 device product:usb model:UsbPhone transport_id:1\n",
+                "List of discovered mdns services\n");
+            ScanResult scan1StaleFinal = AdbScanner.ParseAndMerge(
+                "List of devices attached\nSTALE_A device product:s1 model:StaleOne transport_id:2\nSTALE_B device product:s2 model:StaleTwo transport_id:3\n",
+                "List of discovered mdns services\n");
+            ScanResult scan2FreshFinal = AdbScanner.ParseAndMerge(
+                "List of devices attached\n192.168.50.8:5555 device product:w1 model:FreshWifi transport_id:4\n",
+                "List of discovered mdns services\n");
+
+            Task scan1Task = form.ExecuteScanCoreAsync(async (onStage1, ct) =>
+            {
+                ct.Register(() => scan1TokenCanceled = true);
+                capturedScan1Stage1 = onStage1;
+                await Task.Run(() => onStage1(scan1UsbOnly)).ConfigureAwait(false);
+                // Intentionally ignore ct here to prove generation ID discards stale return even if inner task finishes late.
+                await releaseScan1.Task.ConfigureAwait(false);
+                return scan1StaleFinal;
+            });
+
+            Assert(PumpUntil(() => form.RowCountForTest == 1 && form.StatusTextForTest.Contains("正在探测无线设备"), 2500),
+                "Stage 1 connected USB device must appear before slow wireless probe completes (rows="
+                + form.RowCountForTest + ", status=" + form.StatusTextForTest + ")");
+
+            // Trigger scan #2 while scan #1 is still blocked in wireless phase.
+            Task scan2Task = form.ExecuteScanCoreAsync(async (onStage1, ct) =>
+            {
+                await Task.Delay(30, ct).ConfigureAwait(false);
+                return scan2FreshFinal;
+            });
+
+            Assert(scan1TokenCanceled, "starting scan #2 must cancel active scan #1 CancellationToken");
+            Assert(PumpUntil(() => scan2Task.IsCompleted && form.RowCountForTest == 1 && form.StatusTextForTest.Contains("1 个设备通道"), 2500),
+                "scan #2 must complete cleanly and show 1 fresh device");
+
+            // Now let stale scan #1 fire a late stage1 callback and complete with 2 devices; scan #2 UI must NOT be overwritten.
+            if (capturedScan1Stage1 != null)
+            {
+                capturedScan1Stage1(scan1StaleFinal);
+            }
+            releaseScan1.TrySetResult(true);
+            Assert(PumpUntil(() => scan1Task.IsCompleted, 2500), "stale scan1Task should finish after release");
+            Application.DoEvents();
+            Assert(form.RowCountForTest == 1 && form.StatusTextForTest.Contains("1 个设备通道") && !form.IsBusyState,
+                "stale scan #1 result/stage1 callback MUST NOT overwrite newer scan #2 result (rows="
+                + form.RowCountForTest + ", status=" + form.StatusTextForTest + ", busy=" + form.IsBusyState + ")");
+
+            // 4f. Same-scan race: BeginInvoke stage1 callback arriving after final result MUST NOT revert UI to 1 row or busy=true.
+            TaskCompletionSource<ScanResult> sameScanTcs = new TaskCompletionSource<ScanResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            Action<ScanResult> capturedSameScanStage1 = null;
+            Task sameScanTask = form.ExecuteScanCoreAsync((onStage1, ct) =>
+            {
+                capturedSameScanStage1 = onStage1;
+                return sameScanTcs.Task;
+            });
+
+            // From a worker thread, enqueue continuation for final 2-row result first, then enqueue BeginInvoke stage1 right after
+            // while scanFinished is still false so BeginInvoke enters the UI queue behind the final-result continuation.
+            Task triggerWorker = Task.Run(delegate
+            {
+                sameScanTcs.TrySetResult(scan1StaleFinal);
+                if (capturedSameScanStage1 != null)
+                {
+                    capturedSameScanStage1(scan1UsbOnly);
+                }
+            });
+            triggerWorker.GetAwaiter().GetResult();
+
+            Assert(PumpUntil(() => sameScanTask.IsCompleted, 2500), "same-scan task should complete");
+            Thread.Sleep(30);
+            Application.DoEvents();
+            Assert(form.RowCountForTest == 2 && !form.IsBusyState && form.StatusTextForTest.Contains("2 个设备通道"),
+                "queued stage1 BeginInvoke from SAME scan must not overwrite final 2-row result or set busy=true (rows="
+                + form.RowCountForTest + ", status=" + form.StatusTextForTest + ", busy=" + form.IsBusyState + ")");
+
+            // Late background stage1 callback fired after scan finished must also be ignored.
+            Task.Run(delegate { if (capturedSameScanStage1 != null) capturedSameScanStage1(scan1UsbOnly); }).GetAwaiter().GetResult();
+            Thread.Sleep(20);
+            Application.DoEvents();
+            Assert(form.RowCountForTest == 2 && !form.IsBusyState,
+                "post-completion stage1 callback must stay ignored");
+        }
+
+        // 4e. Closing PairDialog must stop polling timer and cancel background work.
+        using (PairDialog dlg = new PairDialog(new DeviceRunner(new AppConfig()), null))
+        {
+            dlg.ShowInTaskbar = false;
+            dlg.StartPosition = FormStartPosition.Manual;
+            dlg.Location = new Point(-32000, -32000);
+            dlg.Show();
+            Application.DoEvents();
+            Assert(dlg.IsBackgroundPollingActiveForTest && !dlg.IsDialogCancelledForTest,
+                "PairDialog should start polling while visible");
+            dlg.Close();
+            Application.DoEvents();
+            Assert(!dlg.IsBackgroundPollingActiveForTest && dlg.IsDialogCancelledForTest,
+                "Closing PairDialog must stop polling and cancel dialog CTS");
+        }
+
+        // 4g. Parallel wireless probe + serial lookup merge deterministically without overwriting deduplication.
+        ScanResult raceResult = AdbScanner.ParseAndMerge(
+            "List of devices attached\n"
+            + "192.168.10.20:5555   device product:p1 model:PhoneOne transport_id:10\n"
+            + "192.168.10.20:37123  device product:p1 model:PhoneOne transport_id:11\n",
+            "List of discovered mdns services\n"
+            + "adb-DEAD-1\t_adb-tls-connect._tcp\t192.168.10.99:40000\n");
+
+        Task<Dictionary<string, string>> fastSerialTask = Task.FromResult(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "192.168.10.20:5555", "HW_DUPE_1" },
+            { "192.168.10.20:37123", "HW_DUPE_1" }
+        });
+        Task<(List<string> savedToProbe, Dictionary<string, bool> probeResults)> slowWirelessTask = Task.Run(async delegate
+        {
+            await Task.Delay(40).ConfigureAwait(false);
+            return (
+                new List<string> { "192.168.10.50:5555" },
+                new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "192.168.10.99:40000", false },
+                    { "192.168.10.50:5555", true }
+                });
+        });
+
+        DeviceRunner.CompleteScanPostProcessAsync(raceResult, slowWirelessTask, fastSerialTask, CancellationToken.None)
+            .GetAwaiter().GetResult();
+
+        Assert(raceResult.FilteredStaleMdnsCount == 1,
+            "unreachable mDNS should be filtered once, got=" + raceResult.FilteredStaleMdnsCount);
+        int connectedCount = 0;
+        int savedCount = 0;
+        for (int i = 0; i < raceResult.Devices.Count; i++)
+        {
+            if (raceResult.Devices[i].Channel == ChannelKind.WirelessConnected) connectedCount++;
+            else if (raceResult.Devices[i].Channel == ChannelKind.SavedPending) savedCount++;
+        }
+        Assert(connectedCount == 1 && savedCount == 1 && raceResult.Devices.Count == 2,
+            "duplicate wireless channels must stay deduplicated even when wireless probe finishes after serial lookup (connected="
+            + connectedCount + ", saved=" + savedCount + ", total=" + raceResult.Devices.Count + ")");
     }
 }

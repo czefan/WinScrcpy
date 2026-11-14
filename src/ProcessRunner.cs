@@ -188,7 +188,7 @@ internal static class ProcessRunner
         CancellationToken cancellationToken = default,
         int drainTimeoutMs = -1)
     {
-        return RunCore(fileName, args, false, timeoutMs, environment, workingDirectory, cancellationToken, drainTimeoutMs);
+        return RunCoreAsync(fileName, args, false, timeoutMs, environment, workingDirectory, cancellationToken, drainTimeoutMs).GetAwaiter().GetResult();
     }
 
     public static CommandOutput RunBinary(
@@ -200,10 +200,34 @@ internal static class ProcessRunner
         CancellationToken cancellationToken = default,
         int drainTimeoutMs = -1)
     {
-        return RunCore(fileName, args, true, timeoutMs, environment, workingDirectory, cancellationToken, drainTimeoutMs);
+        return RunCoreAsync(fileName, args, true, timeoutMs, environment, workingDirectory, cancellationToken, drainTimeoutMs).GetAwaiter().GetResult();
     }
 
-    static CommandOutput RunCore(
+    public static Task<CommandOutput> RunTextAsync(
+        string fileName,
+        IList<string> args,
+        int timeoutMs,
+        IDictionary<string, string> environment = null,
+        string workingDirectory = null,
+        CancellationToken cancellationToken = default,
+        int drainTimeoutMs = -1)
+    {
+        return RunCoreAsync(fileName, args, false, timeoutMs, environment, workingDirectory, cancellationToken, drainTimeoutMs);
+    }
+
+    public static Task<CommandOutput> RunBinaryAsync(
+        string fileName,
+        IList<string> args,
+        int timeoutMs,
+        IDictionary<string, string> environment = null,
+        string workingDirectory = null,
+        CancellationToken cancellationToken = default,
+        int drainTimeoutMs = -1)
+    {
+        return RunCoreAsync(fileName, args, true, timeoutMs, environment, workingDirectory, cancellationToken, drainTimeoutMs);
+    }
+
+    static async Task<CommandOutput> RunCoreAsync(
         string fileName,
         IList<string> args,
         bool binaryStdout,
@@ -267,7 +291,7 @@ internal static class ProcessRunner
                 ? DrainBinaryStreamAsync(proc.StandardOutput.BaseStream, stdoutBinaryStream, outSync, delegate(Exception ex) { outReadError = ex; })
                 : DrainTextStreamAsync(proc.StandardOutput, stdoutBuilder, outSync, delegate(Exception ex) { outReadError = ex; });
 
-            bool exitedNormally = WaitForExitWithTimeoutAndCancel(proc, timeoutMs, cancellationToken, result);
+            bool exitedNormally = await WaitForExitWithTimeoutAndCancelAsync(proc, timeoutMs, cancellationToken, result).ConfigureAwait(false);
             if (!exitedNormally)
             {
                 // 仅结束本次启动的进程实例（不杀整个进程树），避免误杀共用的 adb server 后台进程。
@@ -290,7 +314,7 @@ internal static class ProcessRunner
             }
 
             // adb start-server 等命令拉起后台守护进程时可能短暂继承管道，限定排空等待并在未读完整时标记状态。
-            FinalizeStreamDrain(
+            await FinalizeStreamDrainAsync(
                 outTask,
                 errTask,
                 effectiveDrainMs,
@@ -303,7 +327,7 @@ internal static class ProcessRunner
                 errSync,
                 delegate { return outReadError; },
                 delegate { return errReadError; },
-                result);
+                result).ConfigureAwait(false);
         }
 
         return result;
@@ -330,7 +354,7 @@ internal static class ProcessRunner
             ? DrainBinaryStreamAsync(stdoutStream, stdoutBinaryStream, outSync, delegate(Exception ex) { outReadError = ex; })
             : DrainTextStreamAsync(new StreamReader(stdoutStream, Encoding.UTF8), stdoutBuilder, outSync, delegate(Exception ex) { outReadError = ex; });
 
-        FinalizeStreamDrain(
+        FinalizeStreamDrainAsync(
             outTask,
             errTask,
             drainTimeoutMs,
@@ -343,10 +367,10 @@ internal static class ProcessRunner
             errSync,
             delegate { return outReadError; },
             delegate { return errReadError; },
-            result);
+            result).GetAwaiter().GetResult();
     }
 
-    static void FinalizeStreamDrain(
+    static async Task FinalizeStreamDrainAsync(
         Task outTask,
         Task errTask,
         int drainTimeoutMs,
@@ -365,7 +389,12 @@ internal static class ProcessRunner
         Exception waitException = null;
         try
         {
-            allDrained = Task.WaitAll(new Task[] { outTask, errTask }, drainTimeoutMs);
+            await Task.WhenAll(outTask, errTask).WaitAsync(TimeSpan.FromMilliseconds(drainTimeoutMs)).ConfigureAwait(false);
+            allDrained = true;
+        }
+        catch (TimeoutException)
+        {
+            allDrained = false;
         }
         catch (Exception ex)
         {
@@ -417,14 +446,14 @@ internal static class ProcessRunner
         }
     }
 
-    static bool WaitForExitWithTimeoutAndCancel(Process proc, int timeoutMs, CancellationToken cancellationToken, CommandOutput result)
+    static async Task<bool> WaitForExitWithTimeoutAndCancelAsync(Process proc, int timeoutMs, CancellationToken cancellationToken, CommandOutput result)
     {
         using (CancellationTokenSource timeoutCts = timeoutMs > 0 ? new CancellationTokenSource(timeoutMs) : new CancellationTokenSource())
         using (CancellationTokenSource linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token))
         {
             try
             {
-                proc.WaitForExitAsync(linkedCts.Token).GetAwaiter().GetResult();
+                await proc.WaitForExitAsync(linkedCts.Token).ConfigureAwait(false);
                 result.ExitCode = proc.ExitCode;
                 return true;
             }
