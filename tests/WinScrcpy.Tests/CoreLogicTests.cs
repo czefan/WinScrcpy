@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using Xunit;
 
 namespace WinScrcpy.Tests;
@@ -364,5 +366,119 @@ public sealed class CoreLogicTests
             try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); }
             catch { }
         }
+    }
+
+    [Fact]
+    public async Task DeviceDiscoveryService_CachesHardwareSerialAndInvalidatesOnChange()
+    {
+        int queryCount = 0;
+        string currentDevicesOut = "List of devices attached\n192.168.1.50:5555\tdevice model:Pixel_9 transport_id:1\n";
+        string currentReturnedSerial = "HWSN_001";
+
+        FakeAdbClient fakeAdb = new FakeAdbClient
+        {
+            QueryDevicesHandler = ct => Task.FromResult(new CommandOutput { ExitCode = 0, StdOut = currentDevicesOut }),
+            QuerySerialHandler = (adbSerial, ct) =>
+            {
+                Interlocked.Increment(ref queryCount);
+                return Task.FromResult(currentReturnedSerial);
+            }
+        };
+
+        HardwareSerialCache cache = new HardwareSerialCache();
+        AppConfig cfg = AppConfig.CreateDefault();
+        DeviceDiscoveryService svc = new DeviceDiscoveryService(cfg, fakeAdb, (ep, ms, ct) => Task.FromResult(false), cache);
+
+        // 1. First scan queries once and populates cache (with transport_id:1).
+        ScanResult r1 = await svc.ScanAsync();
+        Assert.Equal(1, queryCount);
+        Assert.Single(r1.Devices);
+        Assert.Equal("1", r1.Devices[0].TransportId);
+        Assert.Equal("HWSN_001", r1.Devices[0].HardwareSerial);
+
+        // 2. Second scan with same endpoint, model & transport_id:1 hits cache.
+        ScanResult r2 = await svc.ScanAsync();
+        Assert.Equal(1, queryCount);
+        Assert.Equal("HWSN_001", r2.Devices[0].HardwareSerial);
+
+        // 3. Same IP:port & same model replaced without offline step (transport_id:1 -> 2): invalidates cache & re-queries.
+        currentDevicesOut = "List of devices attached\n192.168.1.50:5555\tdevice model:Pixel_9 transport_id:2\n";
+        currentReturnedSerial = "HWSN_002";
+        ScanResult r3 = await svc.ScanAsync();
+        Assert.Equal(2, queryCount);
+        Assert.Equal("2", r3.Devices[0].TransportId);
+        Assert.Equal("HWSN_002", r3.Devices[0].HardwareSerial);
+
+        // 4. Reconnect/disconnect: endpoint goes offline, invalidating cache entry.
+        currentDevicesOut = "List of devices attached\n192.168.1.50:5555\toffline model:Pixel_9 transport_id:2\n";
+        await svc.ScanAsync();
+        Assert.Equal(2, queryCount);
+
+        currentDevicesOut = "List of devices attached\n192.168.1.50:5555\tdevice model:Pixel_9 transport_id:2\n";
+        currentReturnedSerial = "HWSN_003";
+        ScanResult r4 = await svc.ScanAsync();
+        Assert.Equal(3, queryCount);
+        Assert.Equal("HWSN_003", r4.Devices[0].HardwareSerial);
+
+        // 5. Identity uncertainty (Model changed on same IP:port) invalidates cache.
+        currentDevicesOut = "List of devices attached\n192.168.1.50:5555\tdevice model:Pixel_10_Pro transport_id:2\n";
+        currentReturnedSerial = "HWSN_004";
+        ScanResult r5 = await svc.ScanAsync();
+        Assert.Equal(4, queryCount);
+        Assert.Equal("HWSN_004", r5.Devices[0].HardwareSerial);
+
+        // 6. Explicit device invalidation clears entry, and empty failure output is not cached.
+        cache.InvalidateDevice(r5.Devices[0]);
+        currentReturnedSerial = "";
+        ScanResult r6 = await svc.ScanAsync();
+        Assert.Equal(5, queryCount);
+        Assert.Equal("", r6.Devices[0].HardwareSerial);
+
+        currentReturnedSerial = "HWSN_005";
+        ScanResult r7 = await svc.ScanAsync();
+        Assert.Equal(6, queryCount);
+        Assert.Equal("HWSN_005", r7.Devices[0].HardwareSerial);
+
+        // 7. Missing transport_id (unverifiable continuity) conservatively clears cache and bypasses caching.
+        currentDevicesOut = "List of devices attached\n192.168.1.50:5555\tdevice model:Pixel_10_Pro\n";
+        currentReturnedSerial = "HWSN_006";
+        ScanResult r8 = await svc.ScanAsync();
+        Assert.Equal(7, queryCount);
+        Assert.Equal("HWSN_006", r8.Devices[0].HardwareSerial);
+
+        currentReturnedSerial = "HWSN_007";
+        ScanResult r9 = await svc.ScanAsync();
+        Assert.Equal(8, queryCount);
+        Assert.Equal("HWSN_007", r9.Devices[0].HardwareSerial);
+    }
+
+    [Fact]
+    public void DeviceDiscoveryService_MergePendingStage1PreservesUnmatchedWirelessCandidates()
+    {
+        ScanResult previous = AdbScanner.ParseAndMerge(
+            "List of devices attached\n9A8B7C6D5E4F3G2H\tdevice model:Pixel_9\n",
+            string.Join("\n", new[]
+            {
+                "List of discovered mdns services",
+                "adb-9A8B7C6D5E4F3G2H-YzPHtO (2)\t_adb-tls-connect._tcp\t192.168.3.8:38081",
+                "adb-OTHER999-AbCdEf\t_adb-tls-connect._tcp\t192.168.3.99:41001"
+            }));
+        AdbScanner.MergeReachableSavedEndpoints(previous, new[] { "192.168.3.12:5555" });
+
+        // Stage1 only sees USB + one already-connected saved endpoint (192.168.3.12:5555).
+        ScanResult stage1 = AdbScanner.ParseAndMerge(
+            "List of devices attached\n9A8B7C6D5E4F3G2H\tdevice model:Pixel_9\n192.168.3.12:5555\tdevice model:SavedTab\n",
+            "");
+
+        ScanResult merged = DeviceDiscoveryService.MergePendingStage1(stage1, previous);
+
+        // USB matches should NOT suppress wireless MdnsPending of same hardware serial;
+        // 192.168.3.12:5555 is already WirelessConnected in stage1 so SavedPending is NOT duplicated.
+        Assert.Equal(4, merged.Devices.Count);
+        Assert.Contains(merged.Devices, d => d.Channel == ChannelKind.Usb && !d.IsChecking);
+        Assert.Contains(merged.Devices, d => d.Channel == ChannelKind.WirelessConnected && d.AdbSerial == "192.168.3.12:5555" && !d.IsChecking);
+        Assert.Contains(merged.Devices, d => d.Channel == ChannelKind.MdnsPending && d.HardwareSerial == "9A8B7C6D5E4F3G2H" && d.IsChecking);
+        Assert.Contains(merged.Devices, d => d.Channel == ChannelKind.MdnsPending && d.CandidateEndpoints.Contains("192.168.3.99:41001") && d.IsChecking);
+        Assert.DoesNotContain(merged.Devices, d => d.Channel == ChannelKind.SavedPending);
     }
 }

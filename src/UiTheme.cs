@@ -354,16 +354,26 @@ internal sealed class ModernButton : Button
 
 internal sealed class PillBadge : Label
 {
-    readonly Color pillBg;
-    readonly Color pillFg;
+    Color pillBg;
+    Color pillFg;
+    ChannelKind currentChannel;
 
     public PillBadge(string text, ChannelKind channel)
     {
-        Text = text;
         Font = UiTheme.BadgeFont;
         AutoSize = true;
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        UpdateBadge(text, channel);
+    }
 
+    public void UpdateBadge(string text, ChannelKind channel)
+    {
+        string nextText = text ?? "";
+        bool changed = !string.Equals(Text, nextText, StringComparison.Ordinal) || currentChannel != channel || pillBg.IsEmpty;
+        if (!changed) return;
+
+        Text = nextText;
+        currentChannel = channel;
         switch (channel)
         {
             case ChannelKind.Usb:
@@ -387,6 +397,7 @@ internal sealed class PillBadge : Label
                 pillFg = Color.FromArgb(196, 30, 40);
                 break;
         }
+        Invalidate();
     }
 
     public override Size GetPreferredSize(Size proposedSize)
@@ -751,7 +762,7 @@ internal sealed class SelectableTextLabel : TextBox
     }
 }
 
-internal sealed class BufferedPanel : Panel
+internal class BufferedPanel : Panel
 {
     public BufferedPanel()
     {

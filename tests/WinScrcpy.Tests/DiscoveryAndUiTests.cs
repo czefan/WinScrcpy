@@ -771,6 +771,8 @@ public sealed class DiscoveryAndUiTests
                     Assert.True(form.ConnectSelectedButton.Visible && form.SelectAllCheckBox.Checked);
 
                     // 3. Single scan with identical Stage1 and Final devices triggers only 1 rebuild.
+                    form.LoadScanResultForTest(new ScanResult());
+                    Application.DoEvents();
                     int beforeTwoStage = form.RebuildCountForTest;
                     ScanResult stage1Scan = AdbScanner.ParseAndMerge("List of devices attached\nNEWUSB01\tdevice model:Pixel_10\n", "");
                     ScanResult finalScan = AdbScanner.ParseAndMerge("List of devices attached\nNEWUSB01\tdevice model:Pixel_10\n", "");
@@ -882,6 +884,426 @@ public sealed class DiscoveryAndUiTests
                 catch { }
             }
         });
+    }
+
+    [Fact]
+    public void DeviceListView_IncrementallyUpdatesChangedRowsAndPreservesState()
+    {
+        StaRunner.Run(() =>
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "winscrcpy_incr_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            string cfgPath = Path.Combine(tempDir, "winscrcpy.json");
+            try
+            {
+                AppConfig cfg = AppConfig.CreateDefault();
+                ConfigManager mgr = new ConfigManager(cfgPath);
+                mgr.Save(cfg);
+
+                Func<int[], string, ScanResult> buildScan = (ids, changedModel) =>
+                {
+                    List<string> lines = new List<string> { "List of devices attached" };
+                    for (int i = 0; i < ids.Length; i++)
+                    {
+                        int id = ids[i];
+                        string model = id == 3 && !string.IsNullOrEmpty(changedModel) ? changedModel : ("Model_" + id);
+                        lines.Add(string.Format("DEV_{0:D2}\tdevice model:{1}", id, model));
+                    }
+                    return AdbScanner.ParseAndMerge(string.Join("\n", lines.ToArray()), "");
+                };
+
+                using (MainForm form = new MainForm(mgr, cfg, null, false))
+                {
+                    form.Height = 420;
+                    UiTestHelpers.ShowOffscreen(form);
+
+                    form.LoadScanResultForTest(buildScan(new[] { 1, 2, 3, 4, 5, 6, 7, 8 }, null));
+                    Application.DoEvents();
+
+                    Control initialCard = form.ActiveTableCard;
+                    int baseCardRebuilds = form.CardRebuildCountForTest;
+                    int baseRowCreates = form.RowCreateCountForTest;
+                    int baseRowUpdates = form.RowUpdateCountForTest;
+
+                    List<Control> initialRows = CollectDeviceRowPanels(form.ActiveTableCard);
+                    List<ModernCheckBox> initialChecks = CollectRowCheckBoxes(form.ActiveTableCard, form.SelectAllCheckBox);
+                    Assert.Equal(8, initialRows.Count);
+                    Assert.Equal(8, initialChecks.Count);
+
+                    // Select row 2 (DEV_02) and row 5 (DEV_05), and scroll down.
+                    initialChecks[1].Checked = true;
+                    initialChecks[4].Checked = true;
+                    form.DeviceListHost.AutoScrollPosition = new Point(0, 80);
+                    Application.DoEvents();
+                    int savedScroll = -form.DeviceListHost.AutoScrollPosition.Y;
+                    Assert.True(savedScroll > 0);
+
+                    // Incrementally change: modify DEV_03 model, remove DEV_06, append DEV_09.
+                    ScanResult nextScan = buildScan(new[] { 1, 2, 3, 4, 5, 7, 8, 9 }, "Model_3_New");
+                    form.LoadScanResultForTest(nextScan);
+                    Application.DoEvents();
+
+                    // Whole card was NOT rebuilt; only DEV_03 updated and DEV_09 created.
+                    Assert.Same(initialCard, form.ActiveTableCard);
+                    Assert.Equal(baseCardRebuilds, form.CardRebuildCountForTest);
+                    Assert.Equal(baseRowCreates + 1, form.RowCreateCountForTest);
+                    Assert.Equal(baseRowUpdates + 1, form.RowUpdateCountForTest);
+
+                    List<Control> updatedRows = CollectDeviceRowPanels(form.ActiveTableCard);
+                    List<ModernCheckBox> updatedChecks = CollectRowCheckBoxes(form.ActiveTableCard, form.SelectAllCheckBox);
+                    Assert.Equal(8, updatedRows.Count);
+
+                    // Unchanged rows & updated DEV_03 keep exact same row/checkbox instances.
+                    Assert.Same(initialRows[0], updatedRows[0]);
+                    Assert.Same(initialRows[1], updatedRows[1]);
+                    Assert.Same(initialRows[2], updatedRows[2]);
+                    Assert.Same(initialRows[3], updatedRows[3]);
+                    Assert.Same(initialRows[4], updatedRows[4]);
+                    Assert.Same(initialRows[6], updatedRows[5]); // DEV_07 shifted left
+                    Assert.Same(initialRows[7], updatedRows[6]); // DEV_08 shifted left
+                    Assert.NotSame(initialRows[7], updatedRows[7]); // DEV_09 newly created
+
+                    // DEV_03 shows new title, DEV_02 & DEV_05 keep selection, Tag reflects latest DeviceItem instance, scroll preserved.
+                    Assert.Contains("Model 3 New", CollectRowText(updatedRows[2]));
+                    Assert.True(updatedChecks[1].Checked);
+                    Assert.True(updatedChecks[4].Checked);
+                    Assert.False(updatedChecks[0].Checked);
+                    Assert.Same(nextScan.Devices[1], updatedRows[1].Tag);
+                    Assert.Same(nextScan.Devices[1], updatedChecks[1].Tag);
+                    Assert.Contains("已选 2 / 8 台", CollectAllLabelText(form.ActiveTableCard));
+                    Assert.True(-form.DeviceListHost.AutoScrollPosition.Y > 0);
+
+                    // Removing first row (DEV_01) promotes DEV_02 cleanly with no leading divider before first row.
+                    form.LoadScanResultForTest(buildScan(new[] { 2, 3, 4, 5, 7, 8, 9 }, "Model_3_New"));
+                    Application.DoEvents();
+                    Assert.Same(initialCard, form.ActiveTableCard);
+                    Assert.Equal(baseCardRebuilds, form.CardRebuildCountForTest);
+
+                    List<Control> afterHeadRemoved = CollectDeviceRowPanels(form.ActiveTableCard);
+                    Assert.Equal(7, afterHeadRemoved.Count);
+                    Assert.Same(initialRows[1], afterHeadRemoved[0]);
+                    // Child index 2 in tableCard (after HeaderRow=0, HeaderDivider=1) must be the first row itself, not a divider.
+                    Assert.Same(afterHeadRemoved[0], form.ActiveTableCard.Controls[2]);
+                    UiTestHelpers.AssertAllControlsInTreeUnclipped(form.ActiveTableCard.Controls[0]);
+                    for (int i = 0; i < afterHeadRemoved.Count; i++)
+                    {
+                        UiTestHelpers.AssertAllControlsInTreeUnclipped(afterHeadRemoved[i]);
+                    }
+                    Assert.False(form.DeviceListHost.HorizontalScroll.Visible);
+
+                    form.Close();
+                }
+            }
+            finally
+            {
+                try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); }
+                catch { }
+            }
+        });
+    }
+
+    [Fact]
+    public void MainForm_Stage1RetainsPreviousPendingWirelessDevicesAsChecking()
+    {
+        StaRunner.Run(() =>
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "winscrcpy_stage1_keep_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            string cfgPath = Path.Combine(tempDir, "winscrcpy.json");
+            try
+            {
+                AppConfig cfg = AppConfig.CreateDefault();
+                ConfigManager mgr = new ConfigManager(cfgPath);
+                mgr.Save(cfg);
+
+                using (MainForm form = new MainForm(mgr, cfg, null, false))
+                {
+                    UiTestHelpers.ShowOffscreen(form);
+
+                    // Initial list has 1 USB + 1 MdnsPending device; check the MdnsPending row.
+                    form.LoadScanResultForTest(UiTestHelpers.BuildMockScanResult());
+                    Application.DoEvents();
+                    Control initialCard = form.ActiveTableCard;
+                    int initialCardRebuilds = form.CardRebuildCountForTest;
+                    List<Control> initialRows = CollectDeviceRowPanels(form.ActiveTableCard);
+                    List<ModernCheckBox> initialChecks = CollectRowCheckBoxes(form.ActiveTableCard, form.SelectAllCheckBox);
+                    Assert.Equal(2, initialRows.Count);
+                    Assert.Equal(ChannelKind.MdnsPending, ((DeviceItem)initialChecks[1].Tag).Channel);
+                    initialChecks[1].Checked = true;
+                    Application.DoEvents();
+
+                    TaskCompletionSource<ScanResult> finalTcs = new TaskCompletionSource<ScanResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    ScanResult stage1UsbOnly = AdbScanner.ParseAndMerge("List of devices attached\nUSBDEV001\tdevice model:Pixel_9\n", "");
+
+                    Task scanTask = form.ExecuteScanCoreAsync((onStage1, ct) =>
+                    {
+                        onStage1(stage1UsbOnly);
+                        return finalTcs.Task;
+                    });
+
+                    // Stage 1 must NOT shrink to 1 row: previous MdnsPending stays visible, checked, and marked checking.
+                    Assert.True(UiTestHelpers.PumpUntil(() => form.StatusTextForTest.Contains("已发现 1 台已连接设备"), 2500));
+                    Assert.Equal(2, form.RowCountForTest);
+                    Assert.Same(initialCard, form.ActiveTableCard);
+                    Assert.Equal(initialCardRebuilds, form.CardRebuildCountForTest);
+                    Assert.Same(initialRows[0], CollectDeviceRowPanels(form.ActiveTableCard)[0]);
+                    Assert.Same(initialRows[1], CollectDeviceRowPanels(form.ActiveTableCard)[1]);
+                    Assert.True(initialChecks[1].Checked);
+                    Assert.Contains("正在检查…", CollectRowText(initialRows[1]));
+
+                    // Final confirms the wireless device is still reachable -> clears checking label, keeps selection.
+                    finalTcs.SetResult(UiTestHelpers.BuildMockScanResult());
+                    Assert.True(UiTestHelpers.PumpUntil(() => scanTask.IsCompleted && !form.IsBusyState, 2500));
+                    scanTask.GetAwaiter().GetResult();
+                    Assert.Equal(2, form.RowCountForTest);
+                    Assert.Same(initialCard, form.ActiveTableCard);
+                    Assert.True(initialChecks[1].Checked);
+                    Assert.DoesNotContain("正在检查…", CollectRowText(initialRows[1]));
+
+                    // Second scan where final drops offline wireless -> shrinks cleanly after confirmation, USB row still reused.
+                    int beforeSecondCreates = form.RowCreateCountForTest;
+                    ScanResult usbFinalOnly = AdbScanner.ParseAndMerge("List of devices attached\nUSBDEV001\tdevice model:Pixel_9\n", "");
+                    Task secondScan = form.ExecuteScanCoreAsync((onStage1, ct) => Task.FromResult(usbFinalOnly));
+                    Assert.True(UiTestHelpers.PumpUntil(() => secondScan.IsCompleted && !form.IsBusyState, 2500));
+                    secondScan.GetAwaiter().GetResult();
+
+                    Assert.Equal(1, form.RowCountForTest);
+                    Assert.Same(initialCard, form.ActiveTableCard);
+                    Assert.Equal(beforeSecondCreates, form.RowCreateCountForTest);
+                    Assert.Same(initialRows[0], CollectDeviceRowPanels(form.ActiveTableCard)[0]);
+
+                    form.Close();
+                }
+            }
+            finally
+            {
+                try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); }
+                catch { }
+            }
+        });
+    }
+
+    [Fact]
+    public void DeviceListView_Stage2EnrichmentAndChannelTransitionPreserveRowAndSelection()
+    {
+        StaRunner.Run(() =>
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "winscrcpy_stage2_id_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            string cfgPath = Path.Combine(tempDir, "winscrcpy.json");
+            try
+            {
+                AppConfig cfg = AppConfig.CreateDefault();
+                ConfigManager mgr = new ConfigManager(cfgPath);
+                mgr.Save(cfg);
+
+                using (MainForm form = new MainForm(mgr, cfg, null, false))
+                {
+                    UiTestHelpers.ShowOffscreen(form);
+
+                    // Stage 1: USB + WirelessConnected (no HardwareSerial yet) + MdnsPending
+                    ScanResult stage1 = AdbScanner.ParseAndMerge(
+                        "List of devices attached\n9A8B7C6D5E4F3G2H\tdevice model:Pixel_9 transport_id:1\n192.168.1.80:5555\tdevice model:Pixel_9 transport_id:2\n",
+                        "List of discovered mdns services\nadb-PEND999-AbCdEf\t_adb-tls-connect._tcp\t192.168.1.90:41234\n");
+
+                    form.LoadScanResultForTest(stage1);
+                    Application.DoEvents();
+
+                    Control initialCard = form.ActiveTableCard;
+                    int initialCardRebuilds = form.CardRebuildCountForTest;
+                    int initialRowCreates = form.RowCreateCountForTest;
+                    List<Control> rows1 = CollectDeviceRowPanels(form.ActiveTableCard);
+                    List<ModernCheckBox> checks1 = CollectRowCheckBoxes(form.ActiveTableCard, form.SelectAllCheckBox);
+                    Assert.Equal(3, rows1.Count);
+                    Assert.Equal(ChannelKind.Usb, ((DeviceItem)checks1[0].Tag).Channel);
+                    Assert.Equal(ChannelKind.WirelessConnected, ((DeviceItem)checks1[1].Tag).Channel);
+                    Assert.Equal(ChannelKind.MdnsPending, ((DeviceItem)checks1[2].Tag).Channel);
+
+                    // User checks both wireless rows, leaves USB row unchecked.
+                    checks1[1].Checked = true;
+                    checks1[2].Checked = true;
+                    Application.DoEvents();
+
+                    // Stage 2:
+                    // - 192.168.1.80:5555 gains HardwareSerial matching USB hardware serial & BaseMdnsName
+                    // - MdnsPending transitions to WirelessConnected at 192.168.1.90:41234
+                    ScanResult stage2 = AdbScanner.ParseAndMerge(
+                        "List of devices attached\n"
+                        + "9A8B7C6D5E4F3G2H\tdevice model:Pixel_9 transport_id:1\n"
+                        + "192.168.1.80:5555\tdevice model:Pixel_9 transport_id:2\n"
+                        + "192.168.1.90:41234\tdevice model:PendingPhone transport_id:3\n",
+                        "List of discovered mdns services\n"
+                        + "adb-9A8B7C6D5E4F3G2H-YzPHtO\t_adb-tls-connect._tcp\t192.168.1.80:5555\n"
+                        + "adb-PEND999-AbCdEf\t_adb-tls-connect._tcp\t192.168.1.90:41234\n");
+                    DeviceItem enrichedWireless = stage2.Devices.Find(d => d.Channel == ChannelKind.WirelessConnected && d.AdbSerial == "192.168.1.80:5555");
+                    Assert.NotNull(enrichedWireless);
+                    enrichedWireless.HardwareSerial = "9A8B7C6D5E4F3G2H";
+                    DeviceItem transitionedWireless = stage2.Devices.Find(d => d.Channel == ChannelKind.WirelessConnected && d.AdbSerial == "192.168.1.90:41234");
+                    Assert.NotNull(transitionedWireless);
+                    transitionedWireless.HardwareSerial = "PEND999";
+                    transitionedWireless.BaseMdnsName = "adb-PEND999-AbCdEf";
+
+                    form.LoadScanResultForTest(stage2);
+                    Application.DoEvents();
+
+                    List<Control> rows2 = CollectDeviceRowPanels(form.ActiveTableCard);
+                    List<ModernCheckBox> checks2 = CollectRowCheckBoxes(form.ActiveTableCard, form.SelectAllCheckBox);
+                    Assert.Equal(3, rows2.Count);
+                    Assert.Same(initialCard, form.ActiveTableCard);
+                    Assert.Equal(initialCardRebuilds, form.CardRebuildCountForTest);
+                    Assert.Equal(initialRowCreates, form.RowCreateCountForTest);
+
+                    for (int i = 0; i < 3; i++)
+                    {
+                        Assert.Same(rows1[i], rows2[i]);
+                        Assert.Same(checks1[i], checks2[i]);
+                    }
+                    Assert.False(checks2[0].Checked);
+                    Assert.True(checks2[1].Checked);
+                    Assert.True(checks2[2].Checked);
+
+                    // Force rebuild (e.g. DPI change) also keeps only the two wireless selections.
+                    ((DeviceListView)form.ActiveTableCard.Parent).HandleDpiChanged();
+                    Application.DoEvents();
+                    List<ModernCheckBox> checksAfterDpi = CollectRowCheckBoxes(form.ActiveTableCard, form.SelectAllCheckBox);
+                    Assert.Equal(3, checksAfterDpi.Count);
+                    Assert.False(checksAfterDpi[0].Checked);
+                    Assert.True(checksAfterDpi[1].Checked);
+                    Assert.True(checksAfterDpi[2].Checked);
+
+                    form.Close();
+                }
+            }
+            finally
+            {
+                try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); }
+                catch { }
+            }
+        });
+    }
+
+    [Theory]
+    [InlineData(10)]
+    [InlineData(30)]
+    public void DeviceListView_SingleRowChangeInLargeListReusesUnchangedRowsAndPreservesScrollAndSelection(int deviceCount)
+    {
+        StaRunner.Run(() =>
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "winscrcpy_single_row_" + deviceCount + "_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            string cfgPath = Path.Combine(tempDir, "winscrcpy.json");
+            try
+            {
+                AppConfig cfg = AppConfig.CreateDefault();
+                ConfigManager mgr = new ConfigManager(cfgPath);
+                mgr.Save(cfg);
+
+                Func<int, ScanResult> buildList = changedIndex =>
+                {
+                    var lines = new List<string>(deviceCount + 1) { "List of devices attached" };
+                    for (int i = 0; i < deviceCount; i++)
+                    {
+                        string model = i == changedIndex ? "Model_" + i + "_New" : "Model_" + i;
+                        lines.Add(string.Format("DEV_{0:D2}\tdevice model:{1}", i, model));
+                    }
+                    return AdbScanner.ParseAndMerge(string.Join("\n", lines), "");
+                };
+
+                using (MainForm form = new MainForm(mgr, cfg, null, false))
+                {
+                    form.Height = 320;
+                    UiTestHelpers.ShowOffscreen(form);
+
+                    form.LoadScanResultForTest(buildList(-1));
+                    Application.DoEvents();
+
+                    Control initialCard = form.ActiveTableCard;
+                    ScrollableControl listView = (ScrollableControl)initialCard.Parent;
+                    listView.AutoScrollPosition = new Point(0, 140);
+                    Application.DoEvents();
+                    int scrollBefore = -listView.AutoScrollPosition.Y;
+                    Assert.True(scrollBefore > 0, "Expected vertical scroll offset before update.");
+
+                    List<Control> initialRows = CollectDeviceRowPanels(initialCard);
+                    List<ModernCheckBox> initialChecks = CollectRowCheckBoxes(initialCard, form.SelectAllCheckBox);
+                    Assert.Equal(deviceCount, initialRows.Count);
+
+                    int keepCheckedA = 1;
+                    int keepCheckedB = deviceCount - 2;
+                    initialChecks[keepCheckedA].Checked = true;
+                    initialChecks[keepCheckedB].Checked = true;
+                    Application.DoEvents();
+
+                    int beforeCardRebuilds = form.CardRebuildCountForTest;
+                    int beforeRowCreates = form.RowCreateCountForTest;
+                    int beforeRowUpdates = form.RowUpdateCountForTest;
+
+                    // Change only row index 3.
+                    int changedRow = 3;
+                    form.LoadScanResultForTest(buildList(changedRow));
+                    Application.DoEvents();
+
+                    Assert.Equal(deviceCount, form.RowCountForTest);
+                    Assert.Same(initialCard, form.ActiveTableCard);
+                    Assert.Equal(beforeCardRebuilds, form.CardRebuildCountForTest);
+                    Assert.Equal(beforeRowCreates, form.RowCreateCountForTest);
+                    Assert.Equal(beforeRowUpdates + 1, form.RowUpdateCountForTest);
+
+                    List<Control> afterRows = CollectDeviceRowPanels(form.ActiveTableCard);
+                    List<ModernCheckBox> afterChecks = CollectRowCheckBoxes(form.ActiveTableCard, form.SelectAllCheckBox);
+                    Assert.Equal(deviceCount, afterRows.Count);
+
+                    for (int i = 0; i < deviceCount; i++)
+                    {
+                        Assert.Same(initialRows[i], afterRows[i]);
+                        Assert.Same(initialChecks[i], afterChecks[i]);
+                    }
+
+                    Assert.Contains("Model 3 New", CollectRowText(afterRows[changedRow]));
+                    Assert.True(afterChecks[keepCheckedA].Checked);
+                    Assert.True(afterChecks[keepCheckedB].Checked);
+
+                    int scrollAfter = -listView.AutoScrollPosition.Y;
+                    Assert.True(Math.Abs(scrollAfter - scrollBefore) <= 2,
+                        string.Format("Expected scrollY near {0}, actual {1}.", scrollBefore, scrollAfter));
+
+                    form.Close();
+                }
+            }
+            finally
+            {
+                try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); }
+                catch { }
+            }
+        });
+    }
+
+    static List<Control> CollectDeviceRowPanels(Control card)
+    {
+        List<Control> rows = new List<Control>();
+        if (card == null) return rows;
+        for (int i = 0; i < card.Controls.Count; i++)
+        {
+            if (card.Controls[i].Tag is DeviceItem) rows.Add(card.Controls[i]);
+        }
+        return rows;
+    }
+
+    static string CollectRowText(Control row)
+    {
+        if (row == null) return "";
+        List<string> texts = new List<string>();
+        CollectRowTextCore(row, texts);
+        return string.Join(" | ", texts);
+    }
+
+    static void CollectRowTextCore(Control root, List<string> texts)
+    {
+        foreach (Control c in root.Controls)
+        {
+            if ((c is Label || c is SelectableTextLabel) && !string.IsNullOrEmpty(c.Text)) texts.Add(c.Text);
+            CollectRowTextCore(c, texts);
+        }
     }
 
     static List<ModernCheckBox> CollectRowCheckBoxes(Control root, CheckBox selectAll)

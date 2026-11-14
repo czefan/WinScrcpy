@@ -5,6 +5,184 @@ using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 
+internal sealed class HardwareSerialCache
+{
+    readonly struct Entry
+    {
+        public readonly string HardwareSerial;
+        public readonly string Model;
+        public readonly string TransportId;
+
+        public Entry(string hardwareSerial, string model, string transportId)
+        {
+            HardwareSerial = hardwareSerial;
+            Model = model ?? "";
+            TransportId = transportId ?? "";
+        }
+    }
+
+    readonly object sync = new object();
+    readonly Dictionary<string, Entry> entries = new Dictionary<string, Entry>(StringComparer.OrdinalIgnoreCase);
+
+    public int Count
+    {
+        get
+        {
+            lock (sync)
+            {
+                return entries.Count;
+            }
+        }
+    }
+
+    public bool TryGet(DeviceItem item, out string hardwareSerial)
+    {
+        hardwareSerial = "";
+        if (item == null || item.Channel != ChannelKind.WirelessConnected || string.IsNullOrWhiteSpace(item.AdbSerial))
+        {
+            return false;
+        }
+
+        string key = item.AdbSerial.Trim();
+        string currentTransportId = item.TransportId != null ? item.TransportId.Trim() : "";
+        lock (sync)
+        {
+            Entry cached;
+            if (!entries.TryGetValue(key, out cached))
+            {
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(cached.TransportId)
+                || string.IsNullOrWhiteSpace(currentTransportId)
+                || !string.Equals(cached.TransportId, currentTransportId, StringComparison.Ordinal))
+            {
+                entries.Remove(key);
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(cached.Model)
+                && !string.IsNullOrWhiteSpace(item.Model)
+                && !string.Equals(cached.Model, item.Model.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                entries.Remove(key);
+                return false;
+            }
+
+            string inferred = !string.IsNullOrWhiteSpace(item.BaseMdnsName)
+                ? AdbScanner.ExtractHardwareSerialFromInstance(item.BaseMdnsName)
+                : "";
+            if (!string.IsNullOrWhiteSpace(inferred)
+                && !string.Equals(inferred, cached.HardwareSerial, StringComparison.OrdinalIgnoreCase))
+            {
+                entries.Remove(key);
+                return false;
+            }
+
+            hardwareSerial = cached.HardwareSerial;
+            return true;
+        }
+    }
+
+    public void Set(string adbSerial, string transportId, string hardwareSerial, string model)
+    {
+        if (string.IsNullOrWhiteSpace(adbSerial) || string.IsNullOrWhiteSpace(hardwareSerial)) return;
+        string key = adbSerial.Trim();
+        lock (sync)
+        {
+            if (string.IsNullOrWhiteSpace(transportId))
+            {
+                entries.Remove(key);
+                return;
+            }
+            entries[key] = new Entry(hardwareSerial.Trim(), model != null ? model.Trim() : "", transportId.Trim());
+        }
+    }
+
+    public void ReconcileDevices(IList<DeviceItem> devices)
+    {
+        HashSet<string> activeWireless = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (devices != null)
+        {
+            for (int i = 0; i < devices.Count; i++)
+            {
+                DeviceItem item = devices[i];
+                if (item != null && item.Channel == ChannelKind.WirelessConnected && !string.IsNullOrWhiteSpace(item.AdbSerial))
+                {
+                    activeWireless.Add(item.AdbSerial.Trim());
+                }
+            }
+        }
+
+        lock (sync)
+        {
+            if (entries.Count == 0) return;
+            List<string> stale = null;
+            foreach (string key in entries.Keys)
+            {
+                if (!activeWireless.Contains(key))
+                {
+                    if (stale == null) stale = new List<string>();
+                    stale.Add(key);
+                }
+            }
+            if (stale != null)
+            {
+                for (int i = 0; i < stale.Count; i++)
+                {
+                    entries.Remove(stale[i]);
+                }
+            }
+        }
+    }
+
+    public void InvalidateEndpoint(string endpoint)
+    {
+        if (string.IsNullOrWhiteSpace(endpoint)) return;
+        lock (sync)
+        {
+            entries.Remove(endpoint.Trim());
+        }
+    }
+
+    public void InvalidateDevice(DeviceItem item)
+    {
+        if (item == null) return;
+        lock (sync)
+        {
+            if (!string.IsNullOrWhiteSpace(item.AdbSerial)) entries.Remove(item.AdbSerial.Trim());
+            if (item.CandidateEndpoints != null)
+            {
+                for (int i = 0; i < item.CandidateEndpoints.Count; i++)
+                {
+                    if (!string.IsNullOrWhiteSpace(item.CandidateEndpoints[i]))
+                    {
+                        entries.Remove(item.CandidateEndpoints[i].Trim());
+                    }
+                }
+            }
+            if (item.AlternateSerials != null)
+            {
+                for (int i = 0; i < item.AlternateSerials.Count; i++)
+                {
+                    if (!string.IsNullOrWhiteSpace(item.AlternateSerials[i]))
+                    {
+                        entries.Remove(item.AlternateSerials[i].Trim());
+                    }
+                }
+            }
+        }
+    }
+
+    public void Clear()
+    {
+        lock (sync)
+        {
+            entries.Clear();
+        }
+    }
+}
+
 internal sealed class DeviceDiscoveryService
 {
     public const int MaxTcpProbeConcurrency = 16;
@@ -13,15 +191,18 @@ internal sealed class DeviceDiscoveryService
     readonly AppConfig config;
     readonly IAdbClient adb;
     readonly Func<string, int, CancellationToken, Task<bool>> tcpProbe;
+    readonly HardwareSerialCache serialCache;
 
     public DeviceDiscoveryService(
         AppConfig config,
         IAdbClient adbClient = null,
-        Func<string, int, CancellationToken, Task<bool>> tcpProbe = null)
+        Func<string, int, CancellationToken, Task<bool>> tcpProbe = null,
+        HardwareSerialCache hardwareSerialCache = null)
     {
         this.config = config;
         this.adb = adbClient ?? new AdbClient(config);
         this.tcpProbe = tcpProbe ?? ProbeTcpEndpointAsync;
+        this.serialCache = hardwareSerialCache ?? new HardwareSerialCache();
     }
 
     public Task<ScanResult> ScanAsync(Action<ScanResult> onStage1 = null, CancellationToken cancellationToken = default)
@@ -144,12 +325,114 @@ internal sealed class DeviceDiscoveryService
         }
     }
 
+    public static ScanResult MergePendingStage1(ScanResult stage1, ScanResult previousScan)
+    {
+        ScanResult merged = new ScanResult();
+        if (stage1 != null)
+        {
+            merged.Warning = stage1.Warning ?? "";
+            merged.FilteredStaleMdnsCount = stage1.FilteredStaleMdnsCount;
+            if (stage1.PairingServices != null) merged.PairingServices.AddRange(stage1.PairingServices);
+            if (stage1.Devices != null) merged.Devices.AddRange(stage1.Devices);
+        }
+
+        if (previousScan == null || previousScan.Devices == null || previousScan.Devices.Count == 0)
+        {
+            return merged;
+        }
+
+        bool addedPending = false;
+        for (int i = 0; i < previousScan.Devices.Count; i++)
+        {
+            DeviceItem prev = previousScan.Devices[i];
+            if (prev == null || (prev.Channel != ChannelKind.MdnsPending && prev.Channel != ChannelKind.SavedPending))
+            {
+                continue;
+            }
+            if (HasNonUsbMatch(merged.Devices, prev))
+            {
+                continue;
+            }
+
+            DeviceItem clone = new DeviceItem
+            {
+                Channel = prev.Channel,
+                AdbSerial = prev.AdbSerial,
+                HardwareSerial = prev.HardwareSerial,
+                BaseMdnsName = prev.BaseMdnsName,
+                Model = prev.Model,
+                TransportId = prev.TransportId,
+                CandidateEndpoints = prev.CandidateEndpoints != null ? new List<string>(prev.CandidateEndpoints) : new List<string>(),
+                AlternateSerials = prev.AlternateSerials != null ? new List<string>(prev.AlternateSerials) : new List<string>(),
+                IsChecking = true
+            };
+            merged.Devices.Add(clone);
+            addedPending = true;
+        }
+
+        if (addedPending)
+        {
+            AdbScanner.SortDevices(merged.Devices);
+        }
+        return merged;
+    }
+
+    static bool HasNonUsbMatch(IList<DeviceItem> devices, DeviceItem pending)
+    {
+        for (int i = 0; i < devices.Count; i++)
+        {
+            DeviceItem d = devices[i];
+            if (d == null || d.Channel == ChannelKind.Usb) continue;
+
+            if (!string.IsNullOrWhiteSpace(pending.HardwareSerial)
+                && string.Equals(pending.HardwareSerial, d.HardwareSerial, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            if (!string.IsNullOrWhiteSpace(pending.BaseMdnsName)
+                && string.Equals(pending.BaseMdnsName, d.BaseMdnsName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            if (!string.IsNullOrWhiteSpace(pending.AdbSerial)
+                && string.Equals(pending.AdbSerial, d.AdbSerial, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            if (pending.CandidateEndpoints != null)
+            {
+                for (int k = 0; k < pending.CandidateEndpoints.Count; k++)
+                {
+                    string ep = pending.CandidateEndpoints[k];
+                    if (string.IsNullOrWhiteSpace(ep)) continue;
+                    if (string.Equals(ep, d.AdbSerial, StringComparison.OrdinalIgnoreCase)
+                        || (d.CandidateEndpoints != null && ContainsIgnoreCase(d.CandidateEndpoints, ep))
+                        || (d.AlternateSerials != null && ContainsIgnoreCase(d.AlternateSerials, ep)))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    static bool ContainsIgnoreCase(IList<string> list, string target)
+    {
+        for (int i = 0; i < list.Count; i++)
+        {
+            if (string.Equals(list[i], target, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
     async Task<Dictionary<string, string>> QueryConnectedSerialsAsync(IList<DeviceItem> devices, CancellationToken cancellationToken)
     {
         Dictionary<string, string> serialMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        serialCache.ReconcileDevices(devices);
         if (devices == null || devices.Count == 0) return serialMap;
 
-        List<string> targets = new List<string>();
+        List<(string serial, string transportId, string model)> targets = new List<(string, string, string)>();
         HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (int i = 0; i < devices.Count; i++)
         {
@@ -159,7 +442,15 @@ internal sealed class DeviceDiscoveryService
                 && !string.IsNullOrWhiteSpace(item.AdbSerial)
                 && seen.Add(item.AdbSerial))
             {
-                targets.Add(item.AdbSerial);
+                string cachedSn;
+                if (serialCache.TryGet(item, out cachedSn))
+                {
+                    serialMap[item.AdbSerial] = cachedSn;
+                }
+                else
+                {
+                    targets.Add((item.AdbSerial, item.TransportId ?? "", item.Model ?? ""));
+                }
             }
         }
         if (targets.Count == 0) return serialMap;
@@ -170,31 +461,48 @@ internal sealed class DeviceDiscoveryService
             Task[] tasks = new Task[targets.Count];
             for (int i = 0; i < targets.Count; i++)
             {
-                string target = targets[i];
-                tasks[i] = Task.Run(async delegate
-                {
-                    await adbGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                    try
-                    {
-                        string sn = await adb.QueryHardwareSerialAsync(target, cancellationToken).ConfigureAwait(false);
-                        if (!string.IsNullOrWhiteSpace(sn))
-                        {
-                            lock (sync)
-                            {
-                                serialMap[target] = sn;
-                            }
-                        }
-                    }
-                    finally
-                    {
-                        adbGate.Release();
-                    }
-                }, cancellationToken);
+                string target = targets[i].serial;
+                string transportId = targets[i].transportId;
+                string model = targets[i].model;
+                tasks[i] = QuerySingleHardwareSerialAsync(target, transportId, model, adbGate, serialMap, sync, cancellationToken);
             }
             await Task.WhenAll(tasks).ConfigureAwait(false);
         }
 
         return serialMap;
+    }
+
+    async Task QuerySingleHardwareSerialAsync(
+        string target,
+        string transportId,
+        string model,
+        SemaphoreSlim adbGate,
+        Dictionary<string, string> serialMap,
+        object sync,
+        CancellationToken cancellationToken)
+    {
+        await adbGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            string sn = await adb.QueryHardwareSerialAsync(target, cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(sn))
+            {
+                string trimmed = sn.Trim();
+                serialCache.Set(target, transportId, trimmed, model);
+                lock (sync)
+                {
+                    serialMap[target] = trimmed;
+                }
+            }
+            else
+            {
+                serialCache.InvalidateEndpoint(target);
+            }
+        }
+        finally
+        {
+            adbGate.Release();
+        }
     }
 
     async Task<(List<string> savedToProbe, Dictionary<string, bool> probeResults)> QueryWirelessReachabilityAsync(

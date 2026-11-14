@@ -6,6 +6,7 @@ internal static class AdbScanner
 {
     static readonly Regex DevicesLineRegex = new Regex(@"^(\S+)\s+(.+)$", RegexOptions.Compiled);
     static readonly Regex ModelRegex = new Regex(@"(?:^|\s)model:(\S+)", RegexOptions.Compiled);
+    static readonly Regex TransportIdRegex = new Regex(@"(?:^|\s)transport_id:(\S+)", RegexOptions.Compiled);
     static readonly Regex MdnsLineRegex = new Regex(@"^(.+?)\s+(_adb-[^\s]+)\s+(\S+)$", RegexOptions.Compiled);
     static readonly Regex InstanceSuffixRegex = new Regex(@"^(.*?)(?:\s+\((\d+)\))?$", RegexOptions.Compiled);
     static readonly Regex AdbInstanceSerialRegex = new Regex(@"^adb-(.+)-([A-Za-z0-9]+)$", RegexOptions.Compiled);
@@ -253,6 +254,7 @@ internal static class AdbScanner
             }
             target.Channel = incoming.Channel;
             target.AdbSerial = incoming.AdbSerial;
+            target.TransportId = incoming.TransportId;
         }
         else if (!string.IsNullOrWhiteSpace(incoming.AdbSerial)
             && !string.Equals(incoming.AdbSerial, target.AdbSerial, StringComparison.OrdinalIgnoreCase)
@@ -260,6 +262,8 @@ internal static class AdbScanner
         {
             target.AlternateSerials.Add(incoming.AdbSerial);
         }
+
+        if (string.IsNullOrWhiteSpace(target.TransportId)) target.TransportId = incoming.TransportId;
 
         if (incoming.AlternateSerials != null)
         {
@@ -372,6 +376,12 @@ internal static class AdbScanner
             if (modelMatch.Success)
             {
                 item.Model = modelMatch.Groups[1].Value.Replace('_', ' ').Trim();
+            }
+
+            Match transportMatch = TransportIdRegex.Match(rest);
+            if (transportMatch.Success)
+            {
+                item.TransportId = transportMatch.Groups[1].Value.Trim();
             }
 
             bool isWireless = IsWirelessSerial(serial);

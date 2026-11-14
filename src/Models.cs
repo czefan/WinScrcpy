@@ -32,6 +32,8 @@ internal sealed class DeviceItem
     public string Model;
     public List<string> CandidateEndpoints;
     public List<string> AlternateSerials;
+    public string TransportId;
+    public bool IsChecking;
 
     public DeviceItem()
     {
@@ -41,6 +43,7 @@ internal sealed class DeviceItem
         Model = "";
         CandidateEndpoints = new List<string>();
         AlternateSerials = new List<string>();
+        TransportId = "";
     }
 
     public bool CanConnect

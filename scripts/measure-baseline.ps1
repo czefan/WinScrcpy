@@ -369,6 +369,8 @@ internal static class Program
         MeasureMainFormSingleRender();
         MeasureSameListRefresh(2);
         MeasureSameListRefresh(10);
+        MeasureSingleRowChangeRefresh(10);
+        MeasureSingleRowChangeRefresh(30);
         return 0;
     }
 
@@ -777,6 +779,62 @@ internal static class Program
             "UI_SAME_LIST_REFRESH_{0}DEV=avg:{1:F3} ms,p95:{2:F3} ms,alloc:{3:F1} KB,rebuilds:{4}",
             deviceCount, samples.Average(), Percentile(samples, 0.95), allocKb.Average(), rebuildsAfterWarmup));
     }
+
+    static void MeasureSingleRowChangeRefresh(int deviceCount)
+    {
+        Func<string, string> buildRaw = changedModel =>
+        {
+            StringBuilder devSb = new StringBuilder("List of devices attached\n");
+            for (int i = 0; i < deviceCount; i++)
+            {
+                string model = i == 0 ? changedModel : ("Pixel_" + i);
+                devSb.AppendFormat("DEV{0:D3}\tdevice model:{1}\n", i, model);
+            }
+            return devSb.ToString();
+        };
+
+        AppConfig cfg = AppConfig.CreateDefault();
+        ConfigManager mgr = new ConfigManager(Path.Combine(Path.GetTempPath(), "winscrcpy_incr_bench.json"));
+
+        List<double> samples = new List<double>();
+        List<double> allocKb = new List<double>();
+        int cardRebuilds = 0;
+        int rowCreates = 0;
+        int rowUpdates = 0;
+        using (MainForm form = new MainForm(mgr, cfg, null, false))
+        {
+            form.ShowInTaskbar = false;
+            form.StartPosition = FormStartPosition.Manual;
+            form.Location = new Point(-32000, -32000);
+            form.Show();
+            form.LoadScanResultForTest(AdbScanner.ParseAndMerge(buildRaw("Pixel_Warmup"), ""));
+            Application.DoEvents();
+            int baseCards = form.CardRebuildCountForTest;
+            int baseCreates = form.RowCreateCountForTest;
+            int baseUpdates = form.RowUpdateCountForTest;
+
+            for (int i = 0; i < 5; i++)
+            {
+                ScanResult next = AdbScanner.ParseAndMerge(buildRaw("Pixel_V" + i), "");
+                long a0 = GC.GetAllocatedBytesForCurrentThread();
+                Stopwatch sw = Stopwatch.StartNew();
+                form.LoadScanResultForTest(next);
+                Application.DoEvents();
+                sw.Stop();
+                long a1 = GC.GetAllocatedBytesForCurrentThread();
+                samples.Add(sw.Elapsed.TotalMilliseconds);
+                allocKb.Add((a1 - a0) / 1024.0);
+            }
+            cardRebuilds = form.CardRebuildCountForTest - baseCards;
+            rowCreates = form.RowCreateCountForTest - baseCreates;
+            rowUpdates = form.RowUpdateCountForTest - baseUpdates;
+            form.Close();
+        }
+        samples.Sort();
+        Console.WriteLine(string.Format(
+            "UI_CHANGED_1ROW_REFRESH_{0}DEV=avg:{1:F3} ms,p95:{2:F3} ms,alloc:{3:F1} KB,cardRebuilds:{4},rowCreates:{5},rowUpdates:{6}",
+            deviceCount, samples.Average(), Percentile(samples, 0.95), allocKb.Average(), cardRebuilds, rowCreates, rowUpdates));
+    }
 }
 '@
 
@@ -880,6 +938,8 @@ $e2eTable
 | 同进程单次 ``MainForm`` 创建 + 10 台设备首轮渲染与 DPI 布局 | $($metrics['UI_MAINFORM_10DEV_SINGLE_MS']) ms | 仅用于组件渲染回归参考，不代表应用冷启动 |
 | 同窗体相同列表刷新（2 台 / 5 次） | $($metrics['UI_SAME_LIST_REFRESH_2DEV']) | 快照匹配跳过控件销毁与重建 |
 | 同窗体相同列表刷新（10 台 / 5 次） | $($metrics['UI_SAME_LIST_REFRESH_10DEV']) | 快照匹配跳过控件销毁与重建 |
+| 同窗体单行变动刷新（10 台 / 5 次） | $($metrics['UI_CHANGED_1ROW_REFRESH_10DEV']) | 按标识复用其余行，仅原地更新 1 行 |
+| 同窗体单行变动刷新（30 台 / 5 次） | $($metrics['UI_CHANGED_1ROW_REFRESH_30DEV']) | 按标识复用其余行，仅原地更新 1 行 |
 
 > 附注：此前同进程连续 6 次创建并 ``Show()/Close()`` ``MainForm`` 时，第 2~3 次起出现约 1,798~2,020 ms 的反常耗时；经实测排查，空 ``new System.Windows.Forms.Form()`` 在同进程连续 ``Show()/Close()`` 到第 7 次起同样触发约 2,013 ms 的系统级 ``Form.Show()`` 阻塞，属于同进程重复弹窗测量的系统伪影，并非 ``MainForm`` 性能退化。实际应用启动性能请以上方「应用端到端启动与空闲资源基线」为准。
 "@
