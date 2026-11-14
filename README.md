@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/icon.png" alt="WinScrcpy" width="84" height="84" />
+  <img src="assets/icon.png" alt="WinScrcpy" width="128" height="128" />
 </p>
 
 <h1 align="center">WinScrcpy</h1>
@@ -8,17 +8,18 @@
 
 ## 功能说明
 
-- **设备扫描**：并发执行 `adb devices -l` 与 `adb mdns services` 并归并显示设备通道，扫描阶段不发起 `adb connect`。
-- **常用地址探活**：对配置文件中 `savedEndpoints` 与 mDNS 候选端口并发执行 TCP 端口连通性检测；离线 mDNS 记录自动过滤，在线的常用无线目标标记为「常用待连」。
-- **按需连接与投屏**：支持单台点击 **投屏**，或勾选多台后点击 **投屏所选**。待连无线设备会先按需执行 `adb connect`，随后以无控制台子进程方式启动 `scrcpy`；全部选中项启动完成后主窗口退出。
+- **设备扫描**：异步分阶段并发执行 `adb devices -l` 与 `adb mdns services` 并归并显示设备通道，扫描阶段不发起 `adb connect`。
+- **常用地址探活**：对配置文件中 `savedEndpoints` 与 mDNS 候选端口并发执行有限并发度的 TCP 端口连通性检测；离线 mDNS 记录自动过滤，在线的常用无线目标标记为「常用待连」。
+- **按需连接与投屏**：支持单台点击 **投屏**，或勾选多台后点击 **投屏所选**。待连无线设备会先按需执行 `adb connect`，随后以脱离窗口子进程启动 `scrcpy` 并写入独立启动日志（`%TEMP%\WinScrcpy\logs`）；全部选中项启动确认后主窗口退出，若有失败或取消则保留窗口提示错误细节。
 - **无线调试配对（Android 11+）**：提供 **扫码配对** 与 **配对码配对** 两种方式，配合 `adb mdns services` 轮询与 `adb pair` 完成配对。
 - **手动连接与常用地址管理**：支持完整 `IP:Port`（含 IPv6）或网段快捷拼装单次连接，并支持保存为常用地址；可通过 **更多 ▾ -> 管理常用地址…** 在表格窗口中集中编辑地址、显示别名及去重。
 - **截屏到剪贴板**：通过 `adb exec-out screencap -p` 读取原始 PNG 流并写入系统剪贴板，操作后保留主窗口。
 - **设备行右键终端**：右键设备行可打开 **进入 ADB Shell** 或 **打开本地 ADB 终端**（预先设置 `ANDROID_SERIAL` 与 `adb` 路径），优先使用 Windows Terminal (`wt`) 与 PowerShell 7 (`pwsh`)，不可用时回退至系统控制台与 `powershell`。
+- **高 DPI 与工具解析**：启用 WinForms `PerMonitorV2` 高 DPI 适配；外部工具固定按「显式配置绝对路径 → 程序目录 → 系统 `PATH`」顺序查找，并向 `scrcpy` 透传同一份 `ADB` 环境变量。
 
 ## 配置说明（`winscrcpy.json`）
 
-程序默认从 `WinScrcpy.exe` 所在目录读取 `winscrcpy.json`（若从旧版迁移或切换构建输出目录，需将原 `winscrcpy.json` 复制到对应产物目录）。首次启动若不存在 `winscrcpy.json`，会自动生成默认配置；也可复制 [winscrcpy.example.json](winscrcpy.example.json) 为 `winscrcpy.json` 后修改：
+程序采用便携模式，从 `WinScrcpy.exe` 所在目录读取 `winscrcpy.json`（若从旧版迁移或切换构建输出目录，需将原 `winscrcpy.json` 复制到对应产物目录）。保存配置时会先写同目录临时文件再原子替换目标并保留 `winscrcpy.json.bak` 备份；若原配置文件损坏，程序会保留损坏文件并在状态栏提示警告，且在修复或移除损坏文件前阻止自动覆盖。首次启动若不存在 `winscrcpy.json`，会自动生成默认配置；也可复制 [winscrcpy.example.json](winscrcpy.example.json) 为 `winscrcpy.json` 后修改：
 
 ```json
 {
@@ -71,7 +72,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 .\bin\Release\net10.0-windows\WinScrcpy.exe
 ```
 
-单文件发布与可选图标生成（输出到 `bin\Release\net10.0-windows\win-x64\publish\WinScrcpy.exe`）：
+单文件发布与可选图标生成（按发布类型分别输出到 `bin\Release\net10.0-windows\win-x64\publish-framework-dependent\WinScrcpy.exe` 与 `publish-selfcontained\WinScrcpy.exe`）：
 
 ```powershell
 # 框架依赖单文件发布（需目标机具备 .NET 10 Desktop Runtime）
@@ -79,6 +80,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Publish
 
 # 自包含单文件发布（无需预装 .NET 运行时）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Publish -SelfContained
+
+# 打包便携发布压缩包（输出到 bin\Release\WinScrcpy-win-x64-selfcontained.zip）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Publish -SelfContained -Package
 
 # 可选：重新生成 assets\app.ico 与 assets\icon.png
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\generate-icon.ps1 -Force
@@ -94,6 +98,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\generate-icon.ps1 
 
 # 或直接使用 dotnet test 运行
 dotnet test .\WinScrcpy.sln -c Release
+
+# 运行性能与产物体积基线脚本（默认先构建并输出到 bin\Release\baseline-report.md；可用 -NoBuild 跳过构建）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\measure-baseline.ps1
 ```
 
 ## 目录结构
@@ -104,7 +111,8 @@ WinScrcpy/
 │  ├─ app.ico                     # 应用程序图标
 │  └─ icon.png                    # README 展示图标
 ├─ scripts/
-│  └─ generate-icon.ps1           # 可选图标生成脚本
+│  ├─ generate-icon.ps1           # 可选图标生成脚本
+│  └─ measure-baseline.ps1        # 性能与产物体积基线脚本
 ├─ WinScrcpy.sln                  # 解决方案（应用项目 + 测试项目）
 ├─ WinScrcpy.csproj               # .NET 10 WinForms 应用项目文件
 ├─ build.ps1                      # dotnet build / publish / test 入口
@@ -113,7 +121,7 @@ WinScrcpy/
 ├─ src/
 │  ├─ Program.cs                  # 程序入口与异常边界
 │  ├─ Models.cs                   # 设备信息与通道状态定义
-│  ├─ ConfigManager.cs            # JSON 配置解析、端点规范化校验与设备配置匹配
+│  ├─ ConfigManager.cs            # JSON 配置解析、原子保存与备份、端点校验与匹配
 │  ├─ ProcessRunner.cs            # 外部工具路径解析与异步进程/流读取封装
 │  ├─ DetachedProcessLauncher.cs  # Win32 脱离进程启动与日志句柄监控
 │  ├─ AdbScanner.cs               # adb devices 与 mDNS 服务解析归并
@@ -122,7 +130,7 @@ WinScrcpy/
 │  ├─ ScrcpyLauncher.cs           # scrcpy 参数构造、启动监控与批量投屏结果
 │  ├─ TerminalLauncher.cs         # Windows Terminal / PowerShell 启动与脚本构造
 │  ├─ QrEncoder.cs                # QR 码矩阵生成与位图渲染
-│  ├─ UiTheme.cs                  # DPI 缩放、窗口图标加载与自绘控件
+│  ├─ UiTheme.cs                  # PerMonitorV2 DPI 换算、窗口图标与自绘控件
 │  ├─ MainForm.cs                 # 主窗口界面与用户交互
 │  ├─ PairDialog.cs               # 无线调试配对对话框（扫码 / 配对码）
 │  ├─ ManualConnectDialog.cs      # 手动 IP:Port 直连对话框
