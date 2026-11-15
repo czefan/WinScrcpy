@@ -337,6 +337,104 @@ public sealed class DiscoveryAndUiTests
     }
 
     [Fact]
+    public async Task DiscoveryService_SurfacesNonZeroAdbAndMdnsExitWarningsEvenWithoutOutput()
+    {
+        // 1. adb devices exits non-zero with daemon stderr
+        FakeAdbClient daemonErrorAdb = new FakeAdbClient
+        {
+            QueryDevicesHandler = ct => Task.FromResult(new CommandOutput
+            {
+                ExitCode = 1,
+                StdOut = "",
+                StdErr = "error: cannot connect to daemon"
+            }),
+            QueryMdnsHandler = ct => Task.FromResult(new CommandOutput
+            {
+                ExitCode = 0,
+                StdOut = "List of discovered mdns services\n"
+            })
+        };
+
+        DeviceDiscoveryService errSvc = new DeviceDiscoveryService(AppConfig.CreateDefault(), daemonErrorAdb);
+        ScanResult errStage1 = null;
+        ScanResult errFinal = await errSvc.ScanAsync(s1 => errStage1 = s1, CancellationToken.None);
+
+        Assert.NotNull(errStage1);
+        Assert.Contains("error: cannot connect to daemon", errStage1.Warning);
+        Assert.Contains("error: cannot connect to daemon", errFinal.Warning);
+        Assert.Empty(errFinal.Devices);
+
+        // 2. adb devices exits non-zero silently without stdout/stderr
+        FakeAdbClient silentDevicesErrAdb = new FakeAdbClient
+        {
+            QueryDevicesHandler = ct => Task.FromResult(new CommandOutput
+            {
+                ExitCode = 2,
+                StdOut = "",
+                StdErr = ""
+            }),
+            QueryMdnsHandler = ct => Task.FromResult(new CommandOutput
+            {
+                ExitCode = 0,
+                StdOut = ""
+            })
+        };
+
+        DeviceDiscoveryService silentDevSvc = new DeviceDiscoveryService(AppConfig.CreateDefault(), silentDevicesErrAdb);
+        ScanResult silentDevStage1 = null;
+        ScanResult silentDevFinal = await silentDevSvc.ScanAsync(s1 => silentDevStage1 = s1, CancellationToken.None);
+
+        Assert.NotNull(silentDevStage1);
+        Assert.Contains("adb devices", silentDevStage1.Warning);
+        Assert.Contains("2", silentDevStage1.Warning);
+        Assert.Contains("adb devices", silentDevFinal.Warning);
+        Assert.Contains("2", silentDevFinal.Warning);
+
+        // 3. adb mdns services exits non-zero silently when adb devices succeeded
+        FakeAdbClient silentMdnsErrAdb = new FakeAdbClient
+        {
+            QueryDevicesHandler = ct => Task.FromResult(new CommandOutput
+            {
+                ExitCode = 0,
+                StdOut = "List of devices attached\n"
+            }),
+            QueryMdnsHandler = ct => Task.FromResult(new CommandOutput
+            {
+                ExitCode = 3,
+                StdOut = "",
+                StdErr = ""
+            })
+        };
+
+        DeviceDiscoveryService silentMdnsSvc = new DeviceDiscoveryService(AppConfig.CreateDefault(), silentMdnsErrAdb);
+        ScanResult silentMdnsStage1 = null;
+        ScanResult silentMdnsFinal = await silentMdnsSvc.ScanAsync(s1 => silentMdnsStage1 = s1, CancellationToken.None);
+
+        Assert.NotNull(silentMdnsStage1);
+        Assert.True(string.IsNullOrEmpty(silentMdnsStage1.Warning));
+        Assert.Contains("mDNS", silentMdnsFinal.Warning);
+        Assert.Contains("3", silentMdnsFinal.Warning);
+
+        // 4. MainForm renders ADB warning instead of "未发现设备"
+        StaRunner.Run(delegate
+        {
+            string tempCfg = Path.Combine(Path.GetTempPath(), "WinScrcpy-adb-warn-" + Guid.NewGuid().ToString("N") + ".json");
+            ConfigManager manager = new ConfigManager(tempCfg);
+            using (MainForm form = new MainForm(manager, AppConfig.CreateDefault(), null, false))
+            {
+                UiTestHelpers.ShowOffscreen(form);
+                Task scanTask = form.ExecuteScanCoreAsync((onStage1, ct) => errSvc.ScanAsync(onStage1, ct));
+                UiTestHelpers.PumpUntil(() => scanTask.IsCompleted, 3000);
+                scanTask.GetAwaiter().GetResult();
+
+                Assert.Contains("error: cannot connect to daemon", form.StatusTextForTest);
+                Assert.DoesNotContain("未发现设备", form.StatusTextForTest);
+            }
+            if (File.Exists(tempCfg)) File.Delete(tempCfg);
+        });
+    }
+
+    [Fact]
     public void MainForm_RecoversFromBusyExceptions_AndIsolatesStagedAndSameScanRaces()
     {
         StaRunner.Run(delegate

@@ -233,12 +233,7 @@ internal sealed class DeviceDiscoveryService
             mdnsOut != null ? mdnsOut.StdOut : "");
 
         ApplyDevicesStageWarning(result, devOut);
-        if (string.IsNullOrEmpty(result.Warning)
-            && mdnsOut != null
-            && (mdnsOut.HasExecutionFailure || (mdnsOut.ExitCode != 0 && !string.IsNullOrWhiteSpace(mdnsOut.StdErr))))
-        {
-            result.Warning = "mDNS 查询提示: " + mdnsOut.GetFailureSummary(mdnsOut.StdErr != null ? mdnsOut.StdErr.Trim() : "");
-        }
+        ApplyMdnsStageWarning(result, mdnsOut);
 
         // 无线 TCP 探活与序列号读取仅返回只读映射；全部完成后统一串行修改 result.Devices，防止竞态覆盖。
         Task<(List<string> savedToProbe, Dictionary<string, bool> probeResults)> wirelessTask =
@@ -323,6 +318,27 @@ internal sealed class DeviceDiscoveryService
         {
             result.Warning = "adb devices 输出读取不完整: " + devOut.GetFailureSummary("输出异常");
         }
+        else if (devOut.ExitCode != 0)
+        {
+            string detail = !string.IsNullOrWhiteSpace(devOut.StdErr)
+                ? devOut.StdErr.Trim()
+                : devOut.GetFailureSummary(string.Format("异常退出 (退出码 {0})", devOut.ExitCode));
+            result.Warning = "adb devices 查询失败: " + detail;
+        }
+    }
+
+    static void ApplyMdnsStageWarning(ScanResult result, CommandOutput mdnsOut)
+    {
+        if (!string.IsNullOrEmpty(result.Warning) || mdnsOut == null) return;
+        if (!mdnsOut.HasExecutionFailure && mdnsOut.ExitCode == 0) return;
+
+        string fallback = mdnsOut.ExitCode != 0
+            ? string.Format("异常退出 (退出码 {0})", mdnsOut.ExitCode)
+            : "查询异常";
+        string detail = !mdnsOut.HasExecutionFailure && !string.IsNullOrWhiteSpace(mdnsOut.StdErr)
+            ? mdnsOut.StdErr.Trim()
+            : mdnsOut.GetFailureSummary(fallback);
+        result.Warning = "mDNS 查询提示: " + detail;
     }
 
     public static ScanResult MergePendingStage1(ScanResult stage1, ScanResult previousScan)
