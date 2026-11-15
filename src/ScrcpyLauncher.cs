@@ -261,7 +261,9 @@ internal sealed class ScrcpyLauncher
     {
         if (string.IsNullOrWhiteSpace(line)) return false;
         return line.IndexOf("INFO: Texture:", StringComparison.OrdinalIgnoreCase) >= 0
-            || line.IndexOf("INFO: Initial texture:", StringComparison.OrdinalIgnoreCase) >= 0;
+            || line.IndexOf("INFO: Texture (", StringComparison.OrdinalIgnoreCase) >= 0
+            || line.IndexOf("INFO: Initial texture:", StringComparison.OrdinalIgnoreCase) >= 0
+            || line.IndexOf("INFO: Initial texture (", StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
     public static string ExtractDiagnostic(string capturedLog, int maxLines)

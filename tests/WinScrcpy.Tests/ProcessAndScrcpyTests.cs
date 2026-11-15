@@ -409,7 +409,9 @@ public sealed class ProcessAndScrcpyTests
         Assert.False(string.IsNullOrEmpty(ScrcpyLauncher.DetectUnverifiableReadyReason(new string[] { "--no-video", "-V", "ERROR" })));
 
         Assert.True(ScrcpyLauncher.IsReadyLogLine("INFO: Texture: 1080x2400"));
+        Assert.True(ScrcpyLauncher.IsReadyLogLine("INFO: Texture (D3D11VA): 1264x2784"));
         Assert.True(ScrcpyLauncher.IsReadyLogLine("INFO: Initial texture: 1080x2400"));
+        Assert.True(ScrcpyLauncher.IsReadyLogLine("INFO: Initial texture (Vulkan): 1080x2400"));
         Assert.False(ScrcpyLauncher.IsReadyLogLine("INFO: [server] INFO: Device: Pixel"));
         Assert.Contains("Could not find any ADB device",
             ScrcpyLauncher.ExtractDiagnostic("INFO: connecting\nERROR: Could not find any ADB device\nERROR: Server connection failed\n", 4));

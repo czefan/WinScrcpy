@@ -505,6 +505,31 @@ internal sealed class DeviceDiscoveryService
         }
     }
 
+    sealed class EndpointProbeRequest
+    {
+        public readonly string Endpoint;
+        public CancellationTokenSource ListenCts;
+        public readonly List<CancellationTokenSource> NotifyGroups;
+        public int ConsumerCount;
+
+        public EndpointProbeRequest(string endpoint)
+        {
+            Endpoint = endpoint;
+            NotifyGroups = new List<CancellationTokenSource>();
+        }
+
+        public void AddConsumer(CancellationTokenSource groupCts)
+        {
+            ConsumerCount++;
+            if (groupCts != null)
+            {
+                NotifyGroups.Add(groupCts);
+            }
+            // 仅单一消费组独占的端点可被组内早停取消；共享端点或常用地址只响应扫描级取消。
+            ListenCts = ConsumerCount == 1 && NotifyGroups.Count == 1 ? NotifyGroups[0] : null;
+        }
+    }
+
     async Task<(List<string> savedToProbe, Dictionary<string, bool> probeResults)> QueryWirelessReachabilityAsync(
         IList<DeviceItem> devices,
         CancellationToken cancellationToken)
@@ -513,47 +538,103 @@ internal sealed class DeviceDiscoveryService
         Dictionary<string, bool> emptyResults = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         if (devices == null) return (savedToProbe, emptyResults);
 
-        List<string> uniqueEndpoints = new List<string>();
-        HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        List<EndpointProbeRequest> requests = new List<EndpointProbeRequest>();
+        Dictionary<string, EndpointProbeRequest> byEndpoint = new Dictionary<string, EndpointProbeRequest>(StringComparer.OrdinalIgnoreCase);
+        List<CancellationTokenSource> groupCtsList = new List<CancellationTokenSource>();
 
-        for (int i = 0; i < devices.Count; i++)
+        try
         {
-            DeviceItem item = devices[i];
-            if (item.Channel != ChannelKind.MdnsPending) continue;
-            for (int k = 0; k < item.CandidateEndpoints.Count; k++)
+            for (int i = 0; i < devices.Count; i++)
             {
-                string ep = item.CandidateEndpoints[k];
-                if (seen.Add(ep)) uniqueEndpoints.Add(ep);
+                DeviceItem item = devices[i];
+                if (item.Channel != ChannelKind.MdnsPending || item.CandidateEndpoints.Count == 0) continue;
+
+                // 同一 mDNS 设备只要有一个候选端口连通，立即取消同组其余独占失效端口的等待。
+                CancellationTokenSource groupCts = item.CandidateEndpoints.Count > 1
+                    ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
+                    : null;
+                if (groupCts != null) groupCtsList.Add(groupCts);
+
+                HashSet<string> seenInItem = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                for (int k = 0; k < item.CandidateEndpoints.Count; k++)
+                {
+                    string ep = item.CandidateEndpoints[k];
+                    if (!seenInItem.Add(ep)) continue;
+
+                    EndpointProbeRequest req;
+                    if (!byEndpoint.TryGetValue(ep, out req))
+                    {
+                        req = new EndpointProbeRequest(ep);
+                        byEndpoint[ep] = req;
+                        requests.Add(req);
+                    }
+                    req.AddConsumer(groupCts);
+                }
+            }
+
+            if (config != null && config.savedEndpoints != null)
+            {
+                for (int i = 0; i < config.savedEndpoints.Count; i++)
+                {
+                    string ep = ConfigManager.NormalizeEndpoint(config.savedEndpoints[i]);
+                    if (string.IsNullOrEmpty(ep) || AdbScanner.HasOnlineOrPendingDeviceForEndpoint(devices, ep)) continue;
+                    savedToProbe.Add(ep);
+
+                    EndpointProbeRequest req;
+                    if (!byEndpoint.TryGetValue(ep, out req))
+                    {
+                        req = new EndpointProbeRequest(ep);
+                        byEndpoint[ep] = req;
+                        requests.Add(req);
+                    }
+                    req.AddConsumer(null);
+                }
+            }
+
+            if (requests.Count == 0) return (savedToProbe, emptyResults);
+
+            Dictionary<string, bool> probeResults = await ProbeEndpointRequestsAsync(
+                requests, 1000, MaxTcpProbeConcurrency, cancellationToken, tcpProbe).ConfigureAwait(false);
+            return (savedToProbe, probeResults);
+        }
+        finally
+        {
+            for (int i = 0; i < groupCtsList.Count; i++)
+            {
+                groupCtsList[i].Dispose();
             }
         }
-
-        if (config != null && config.savedEndpoints != null)
-        {
-            for (int i = 0; i < config.savedEndpoints.Count; i++)
-            {
-                string ep = ConfigManager.NormalizeEndpoint(config.savedEndpoints[i]);
-                if (string.IsNullOrEmpty(ep) || AdbScanner.HasOnlineOrPendingDeviceForEndpoint(devices, ep)) continue;
-                savedToProbe.Add(ep);
-                if (seen.Add(ep)) uniqueEndpoints.Add(ep);
-            }
-        }
-
-        if (uniqueEndpoints.Count == 0) return (savedToProbe, emptyResults);
-
-        Dictionary<string, bool> probeResults = await ProbeEndpointsAsync(
-            uniqueEndpoints, 1000, MaxTcpProbeConcurrency, cancellationToken, tcpProbe).ConfigureAwait(false);
-        return (savedToProbe, probeResults);
     }
 
-    internal static async Task<Dictionary<string, bool>> ProbeEndpointsAsync(
+    internal static Task<Dictionary<string, bool>> ProbeEndpointsAsync(
         IList<string> endpoints,
         int timeoutMs,
         int maxConcurrency,
         CancellationToken cancellationToken,
         Func<string, int, CancellationToken, Task<bool>> probeOverride = null)
     {
+        if (endpoints == null || endpoints.Count == 0)
+        {
+            return Task.FromResult(new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase));
+        }
+
+        List<EndpointProbeRequest> requests = new List<EndpointProbeRequest>(endpoints.Count);
+        for (int i = 0; i < endpoints.Count; i++)
+        {
+            requests.Add(new EndpointProbeRequest(endpoints[i]));
+        }
+        return ProbeEndpointRequestsAsync(requests, timeoutMs, maxConcurrency, cancellationToken, probeOverride);
+    }
+
+    static async Task<Dictionary<string, bool>> ProbeEndpointRequestsAsync(
+        IList<EndpointProbeRequest> requests,
+        int timeoutMs,
+        int maxConcurrency,
+        CancellationToken cancellationToken,
+        Func<string, int, CancellationToken, Task<bool>> probeOverride)
+    {
         Dictionary<string, bool> results = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-        if (endpoints == null || endpoints.Count == 0) return results;
+        if (requests == null || requests.Count == 0) return results;
 
         int limit = Math.Max(1, maxConcurrency);
         Func<string, int, CancellationToken, Task<bool>> probeFn = probeOverride ?? ProbeTcpEndpointAsync;
@@ -561,19 +642,21 @@ internal sealed class DeviceDiscoveryService
 
         using (SemaphoreSlim gate = new SemaphoreSlim(limit, limit))
         {
-            Task[] tasks = new Task[endpoints.Count];
-            for (int i = 0; i < endpoints.Count; i++)
+            Task[] tasks = new Task[requests.Count];
+            for (int i = 0; i < requests.Count; i++)
             {
-                string ep = endpoints[i];
-                tasks[i] = ProbeOneEndpointAsync(ep, timeoutMs, gate, probeFn, results, sync, cancellationToken);
+                EndpointProbeRequest request = requests[i];
+                tasks[i] = ProbeOneEndpointAsync(request, timeoutMs, gate, probeFn, results, sync, cancellationToken);
             }
             await Task.WhenAll(tasks).ConfigureAwait(false);
         }
+
+        cancellationToken.ThrowIfCancellationRequested();
         return results;
     }
 
     static async Task ProbeOneEndpointAsync(
-        string ep,
+        EndpointProbeRequest request,
         int timeoutMs,
         SemaphoreSlim gate,
         Func<string, int, CancellationToken, Task<bool>> probeFn,
@@ -581,22 +664,45 @@ internal sealed class DeviceDiscoveryService
         object sync,
         CancellationToken cancellationToken)
     {
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        CancellationToken effectiveToken = request.ListenCts != null ? request.ListenCts.Token : cancellationToken;
+        bool entered = false;
+        bool reachable = false;
         try
         {
-            bool reachable = false;
-            if (!cancellationToken.IsCancellationRequested)
+            await gate.WaitAsync(effectiveToken).ConfigureAwait(false);
+            entered = true;
+
+            if (!effectiveToken.IsCancellationRequested)
             {
-                reachable = await probeFn(ep, timeoutMs, cancellationToken).ConfigureAwait(false);
+                reachable = await probeFn(request.Endpoint, timeoutMs, effectiveToken).ConfigureAwait(false);
             }
-            lock (sync)
-            {
-                results[ep] = reachable;
-            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            reachable = false;
         }
         finally
         {
-            gate.Release();
+            if (entered) gate.Release();
+        }
+
+        lock (sync)
+        {
+            results[request.Endpoint] = reachable;
+        }
+
+        if (reachable)
+        {
+            for (int i = 0; i < request.NotifyGroups.Count; i++)
+            {
+                try
+                {
+                    request.NotifyGroups[i].Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+            }
         }
     }
 

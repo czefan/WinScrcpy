@@ -186,6 +186,157 @@ public sealed class DiscoveryAndUiTests
     }
 
     [Fact]
+    public async Task DiscoveryService_CancelsSiblingStaleMdnsProbesOnceGroupEndpointSucceeds()
+    {
+        AppConfig cfg = AppConfig.CreateDefault();
+        cfg.savedEndpoints.Add("192.168.10.50:5555");
+
+        FakeAdbClient fakeAdb = new FakeAdbClient
+        {
+            QueryDevicesHandler = ct => Task.FromResult(new CommandOutput
+            {
+                ExitCode = 0,
+                StdOut = "List of devices attached\n"
+            }),
+            QueryMdnsHandler = ct => Task.FromResult(new CommandOutput
+            {
+                ExitCode = 0,
+                StdOut = string.Join("\n", new string[]
+                {
+                    "List of discovered mdns services",
+                    "adb-PHONE1-abc (3)\t_adb-tls-connect._tcp\t192.168.3.8:35841",
+                    "adb-PHONE1-abc\t_adb-tls-connect._tcp\t192.168.3.8:40741",
+                    "adb-PHONE1-abc (2)\t_adb-tls-connect._tcp\t192.168.3.8:38081"
+                })
+            })
+        };
+
+        int siblingCanceledCount = 0;
+        bool savedCompleted = false;
+
+        DeviceDiscoveryService service = new DeviceDiscoveryService(
+            cfg,
+            fakeAdb,
+            async (ep, timeoutMs, ct) =>
+            {
+                if (ep == "192.168.3.8:40741")
+                {
+                    await Task.Delay(15, ct).ConfigureAwait(false);
+                    return true;
+                }
+                if (ep == "192.168.10.50:5555")
+                {
+                    await Task.Delay(80, ct).ConfigureAwait(false);
+                    savedCompleted = true;
+                    return true;
+                }
+                try
+                {
+                    await Task.Delay(5000, ct).ConfigureAwait(false);
+                    return false;
+                }
+                catch (OperationCanceledException)
+                {
+                    Interlocked.Increment(ref siblingCanceledCount);
+                    throw;
+                }
+            });
+
+        ScanResult result = await service.ScanAsync(null, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(2, Volatile.Read(ref siblingCanceledCount));
+        Assert.True(savedCompleted);
+        Assert.Equal(2, result.Devices.Count);
+        Assert.Contains(result.Devices, d =>
+            d.Channel == ChannelKind.MdnsPending
+            && d.CandidateEndpoints.Count == 1
+            && d.CandidateEndpoints[0] == "192.168.3.8:40741");
+        Assert.Contains(result.Devices, d =>
+            d.Channel == ChannelKind.SavedPending
+            && d.CandidateEndpoints.Contains("192.168.10.50:5555"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DiscoveryService_SharedCandidateEndpointIsNotCanceledByOtherGroupEarlyStop(bool reverseGroupOrder)
+    {
+        string[] lines = reverseGroupOrder
+            ? new string[]
+            {
+                "List of discovered mdns services",
+                "adb-DEV_B-2\t_adb-tls-connect._tcp\t192.168.3.20:40002",
+                "adb-DEV_B-2 (2)\t_adb-tls-connect._tcp\t192.168.3.20:40003",
+                "adb-DEV_A-1\t_adb-tls-connect._tcp\t192.168.3.10:40001",
+                "adb-DEV_A-1 (2)\t_adb-tls-connect._tcp\t192.168.3.20:40002"
+            }
+            : new string[]
+            {
+                "List of discovered mdns services",
+                "adb-DEV_A-1\t_adb-tls-connect._tcp\t192.168.3.10:40001",
+                "adb-DEV_A-1 (2)\t_adb-tls-connect._tcp\t192.168.3.20:40002",
+                "adb-DEV_B-2\t_adb-tls-connect._tcp\t192.168.3.20:40002",
+                "adb-DEV_B-2 (2)\t_adb-tls-connect._tcp\t192.168.3.20:40003"
+            };
+
+        FakeAdbClient fakeAdb = new FakeAdbClient
+        {
+            QueryDevicesHandler = ct => Task.FromResult(new CommandOutput
+            {
+                ExitCode = 0,
+                StdOut = "List of devices attached\n"
+            }),
+            QueryMdnsHandler = ct => Task.FromResult(new CommandOutput
+            {
+                ExitCode = 0,
+                StdOut = string.Join("\n", lines)
+            })
+        };
+
+        int exclusiveStaleCanceledCount = 0;
+        DeviceDiscoveryService service = new DeviceDiscoveryService(
+            AppConfig.CreateDefault(),
+            fakeAdb,
+            async (ep, timeoutMs, ct) =>
+            {
+                if (ep == "192.168.3.10:40001")
+                {
+                    await Task.Delay(10, ct).ConfigureAwait(false);
+                    return true;
+                }
+                if (ep == "192.168.3.20:40002")
+                {
+                    // Slower than group A's fast endpoint (10 ms), must not be canceled by group A.
+                    await Task.Delay(70, ct).ConfigureAwait(false);
+                    return true;
+                }
+                try
+                {
+                    await Task.Delay(5000, ct).ConfigureAwait(false);
+                    return false;
+                }
+                catch (OperationCanceledException)
+                {
+                    Interlocked.Increment(ref exclusiveStaleCanceledCount);
+                    throw;
+                }
+            });
+
+        ScanResult result = await service.ScanAsync(null, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(1, Volatile.Read(ref exclusiveStaleCanceledCount));
+        Assert.Equal(2, result.Devices.Count);
+        Assert.Contains(result.Devices, d =>
+            d.BaseMdnsName == "adb-DEV_A-1"
+            && d.CandidateEndpoints.Contains("192.168.3.10:40001")
+            && d.CandidateEndpoints.Contains("192.168.3.20:40002"));
+        Assert.Contains(result.Devices, d =>
+            d.BaseMdnsName == "adb-DEV_B-2"
+            && d.CandidateEndpoints.Count == 1
+            && d.CandidateEndpoints[0] == "192.168.3.20:40002");
+    }
+
+    [Fact]
     public void MainForm_RecoversFromBusyExceptions_AndIsolatesStagedAndSameScanRaces()
     {
         StaRunner.Run(delegate
