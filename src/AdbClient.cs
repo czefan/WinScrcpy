@@ -28,6 +28,22 @@ internal sealed class AdbClient : IAdbClient
         return ToolPathResolver.ResolveTool(config != null ? config.adbPath : "adb", "adb");
     }
 
+    internal bool IsDaemonProcessRunning()
+    {
+        ToolResolutionResult res = ResolveAdbPath();
+        if (!res.Success || string.IsNullOrWhiteSpace(res.ResolvedPath)) return true;
+        string procName = Path.GetFileNameWithoutExtension(res.ResolvedPath);
+        if (string.IsNullOrWhiteSpace(procName)) return true;
+        try
+        {
+            return System.Diagnostics.Process.GetProcessesByName(procName).Length > 0;
+        }
+        catch (Exception)
+        {
+            return true;
+        }
+    }
+
     public Task<CommandOutput> RunAdbAsync(IList<string> args, int timeoutMs, CancellationToken cancellationToken = default)
     {
         if (RunAdbOverrideForTest != null)

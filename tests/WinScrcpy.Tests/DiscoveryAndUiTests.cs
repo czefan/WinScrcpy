@@ -493,6 +493,71 @@ public sealed class DiscoveryAndUiTests
     }
 
     [Fact]
+    public async Task DiscoveryService_RetriesOnceOnDaemonStartupRaceAndNormalizesMultilineWarnings()
+    {
+        const string daemonRaceErr = "* daemon not running; starting now at tcp:5037\ncould not read ok from ADB Server\n* failed to start daemon\nadb.exe: failed to check server version: cannot connect to daemon\n";
+
+        // 1. adb devices hits daemon startup race while mdns succeeds -> retries devices once cleanly.
+        int devCalls1 = 0;
+        FakeAdbClient devRaceAdb = new FakeAdbClient
+        {
+            QueryDevicesHandler = ct =>
+            {
+                int n = Interlocked.Increment(ref devCalls1);
+                return Task.FromResult(n == 1
+                    ? new CommandOutput { ExitCode = 1, StdErr = daemonRaceErr }
+                    : new CommandOutput { ExitCode = 0, StdOut = "List of devices attached\nUSB123\tdevice model:Pixel_8\n" });
+            },
+            QueryMdnsHandler = ct => Task.FromResult(new CommandOutput { ExitCode = 0, StdOut = "List of discovered mdns services\n" })
+        };
+
+        ScanResult stage1AfterDevRetry = null;
+        ScanResult finalAfterDevRetry = await new DeviceDiscoveryService(AppConfig.CreateDefault(), devRaceAdb)
+            .ScanAsync(s1 => stage1AfterDevRetry = s1, CancellationToken.None);
+
+        Assert.Equal(2, devCalls1);
+        Assert.NotNull(stage1AfterDevRetry);
+        Assert.True(string.IsNullOrEmpty(stage1AfterDevRetry.Warning));
+        Assert.True(string.IsNullOrEmpty(finalAfterDevRetry.Warning));
+        Assert.Single(finalAfterDevRetry.Devices);
+
+        // 2. mdns hits daemon startup race while devices succeeds -> retries mdns once cleanly.
+        int mdnsCalls2 = 0;
+        FakeAdbClient mdnsRaceAdb = new FakeAdbClient
+        {
+            QueryDevicesHandler = ct => Task.FromResult(new CommandOutput { ExitCode = 0, StdOut = "List of devices attached\n" }),
+            QueryMdnsHandler = ct =>
+            {
+                int n = Interlocked.Increment(ref mdnsCalls2);
+                return Task.FromResult(n == 1
+                    ? new CommandOutput { ExitCode = 1, StdErr = daemonRaceErr }
+                    : new CommandOutput { ExitCode = 0, StdOut = "List of discovered mdns services\n" });
+            }
+        };
+
+        ScanResult finalAfterMdnsRetry = await new DeviceDiscoveryService(AppConfig.CreateDefault(), mdnsRaceAdb)
+            .ScanAsync(null, CancellationToken.None);
+
+        Assert.Equal(2, mdnsCalls2);
+        Assert.True(string.IsNullOrEmpty(finalAfterMdnsRetry.Warning));
+
+        // 3. Persistent multiline failure is flattened onto one line so single-line status bars keep the root reason visible.
+        FakeAdbClient persistentFailAdb = new FakeAdbClient
+        {
+            QueryDevicesHandler = ct => Task.FromResult(new CommandOutput { ExitCode = 1, StdErr = daemonRaceErr }),
+            QueryMdnsHandler = ct => Task.FromResult(new CommandOutput { ExitCode = 1, StdErr = daemonRaceErr })
+        };
+
+        ScanResult persistentFinal = await new DeviceDiscoveryService(AppConfig.CreateDefault(), persistentFailAdb)
+            .ScanAsync(null, CancellationToken.None);
+
+        Assert.DoesNotContain("\n", persistentFinal.Warning);
+        Assert.DoesNotContain("\r", persistentFinal.Warning);
+        Assert.Contains("failed to start daemon", persistentFinal.Warning);
+        Assert.Contains("cannot connect to daemon", persistentFinal.Warning);
+    }
+
+    [Fact]
     public void MainForm_RecoversFromBusyExceptions_AndIsolatesStagedAndSameScanRaces()
     {
         StaRunner.Run(delegate

@@ -212,21 +212,53 @@ internal sealed class DeviceDiscoveryService
 
     async Task<ScanResult> ScanInternalAsync(Action<ScanResult> onStage1, CancellationToken cancellationToken)
     {
-        Task<CommandOutput> devTask = adb.QueryDevicesRawAsync(cancellationToken);
-        Task<CommandOutput> mdnsTask = adb.QueryMdnsServicesRawAsync(cancellationToken);
+        AdbClient realAdb = adb as AdbClient;
+        bool runStage1BeforeMdns = realAdb != null && !realAdb.IsDaemonProcessRunning();
 
-        CommandOutput devOut = await devTask.ConfigureAwait(false);
-        cancellationToken.ThrowIfCancellationRequested();
+        CommandOutput devOut;
+        CommandOutput mdnsOut;
 
-        if (onStage1 != null)
+        if (runStage1BeforeMdns)
         {
-            ScanResult stage1 = AdbScanner.ParseAndMerge(devOut != null ? devOut.StdOut : "", "");
-            ApplyDevicesStageWarning(stage1, devOut);
-            onStage1(stage1);
-        }
+            // 冷启动时先由单一 adb 命令拉起 daemon，避免 devices 与 mdns 并发抢占 5037 端口导致 failed to start daemon。
+            devOut = await adb.QueryDevicesRawAsync(cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            EmitStage1(onStage1, devOut);
 
-        CommandOutput mdnsOut = await mdnsTask.ConfigureAwait(false);
-        cancellationToken.ThrowIfCancellationRequested();
+            mdnsOut = await adb.QueryMdnsServicesRawAsync(cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+        else
+        {
+            Task<CommandOutput> devTask = adb.QueryDevicesRawAsync(cancellationToken);
+            Task<CommandOutput> mdnsTask = adb.QueryMdnsServicesRawAsync(cancellationToken);
+
+            devOut = await devTask.ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (IsDaemonStartupRaceFailure(devOut))
+            {
+                mdnsOut = await mdnsTask.ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (IsSucceeded(mdnsOut))
+                {
+                    devOut = await adb.QueryDevicesRawAsync(cancellationToken).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+                EmitStage1(onStage1, devOut);
+            }
+            else
+            {
+                EmitStage1(onStage1, devOut);
+                mdnsOut = await mdnsTask.ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (IsDaemonStartupRaceFailure(mdnsOut) && IsSucceeded(devOut))
+                {
+                    mdnsOut = await adb.QueryMdnsServicesRawAsync(cancellationToken).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+            }
+        }
 
         ScanResult result = AdbScanner.ParseAndMerge(
             devOut != null ? devOut.StdOut : "",
@@ -299,12 +331,49 @@ internal sealed class DeviceDiscoveryService
         });
     }
 
+    static void EmitStage1(Action<ScanResult> onStage1, CommandOutput devOut)
+    {
+        if (onStage1 == null) return;
+        ScanResult stage1 = AdbScanner.ParseAndMerge(devOut != null ? devOut.StdOut : "", "");
+        ApplyDevicesStageWarning(stage1, devOut);
+        onStage1(stage1);
+    }
+
+    static bool IsSucceeded(CommandOutput outp)
+    {
+        return outp != null && !outp.HasExecutionFailure && outp.ExitCode == 0;
+    }
+
+    static bool IsDaemonStartupRaceFailure(CommandOutput outp)
+    {
+        if (outp == null || outp.HasExecutionFailure || outp.ExitCode == 0) return false;
+        string err = outp.StdErr ?? "";
+        return err.IndexOf("daemon not running", StringComparison.OrdinalIgnoreCase) >= 0
+            && (err.IndexOf("failed to start daemon", StringComparison.OrdinalIgnoreCase) >= 0
+                || err.IndexOf("could not read ok from ADB Server", StringComparison.OrdinalIgnoreCase) >= 0
+                || err.IndexOf("ADB server didn't ACK", StringComparison.OrdinalIgnoreCase) >= 0
+                || err.IndexOf("cannot connect to daemon", StringComparison.OrdinalIgnoreCase) >= 0);
+    }
+
+    static string NormalizeSingleLineDetail(string detail)
+    {
+        if (string.IsNullOrWhiteSpace(detail)) return "";
+        string[] lines = detail.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        List<string> cleaned = new List<string>(lines.Length);
+        for (int i = 0; i < lines.Length; i++)
+        {
+            string trimmed = lines[i].Trim();
+            if (trimmed.Length > 0) cleaned.Add(trimmed);
+        }
+        return string.Join(" | ", cleaned);
+    }
+
     static void ApplyDevicesStageWarning(ScanResult result, CommandOutput devOut)
     {
         if (devOut == null) return;
         if (!string.IsNullOrWhiteSpace(devOut.LaunchError))
         {
-            result.Warning = "ADB 调用失败: " + devOut.LaunchError;
+            result.Warning = "ADB 调用失败: " + NormalizeSingleLineDetail(devOut.LaunchError);
         }
         else if (devOut.Cancelled)
         {
@@ -316,14 +385,14 @@ internal sealed class DeviceDiscoveryService
         }
         else if (devOut.OutputTimedOut || !string.IsNullOrWhiteSpace(devOut.OutputError))
         {
-            result.Warning = "adb devices 输出读取不完整: " + devOut.GetFailureSummary("输出异常");
+            result.Warning = "adb devices 输出读取不完整: " + NormalizeSingleLineDetail(devOut.GetFailureSummary("输出异常"));
         }
         else if (devOut.ExitCode != 0)
         {
             string detail = !string.IsNullOrWhiteSpace(devOut.StdErr)
-                ? devOut.StdErr.Trim()
+                ? devOut.StdErr
                 : devOut.GetFailureSummary(string.Format("异常退出 (退出码 {0})", devOut.ExitCode));
-            result.Warning = "adb devices 查询失败: " + detail;
+            result.Warning = "adb devices 查询失败: " + NormalizeSingleLineDetail(detail);
         }
     }
 
@@ -336,9 +405,9 @@ internal sealed class DeviceDiscoveryService
             ? string.Format("异常退出 (退出码 {0})", mdnsOut.ExitCode)
             : "查询异常";
         string detail = !mdnsOut.HasExecutionFailure && !string.IsNullOrWhiteSpace(mdnsOut.StdErr)
-            ? mdnsOut.StdErr.Trim()
+            ? mdnsOut.StdErr
             : mdnsOut.GetFailureSummary(fallback);
-        result.Warning = "mDNS 查询提示: " + detail;
+        result.Warning = "mDNS 查询提示: " + NormalizeSingleLineDetail(detail);
     }
 
     public static ScanResult MergePendingStage1(ScanResult stage1, ScanResult previousScan)
