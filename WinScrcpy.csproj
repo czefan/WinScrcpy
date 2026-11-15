@@ -13,10 +13,10 @@
     <Product>WinScrcpy</Product>
     <Description>Native Windows GUI launcher for scrcpy and wireless ADB</Description>
     <Copyright>Copyright (c) 2026 czefan</Copyright>
-    <Version>0.1.0</Version>
-    <AssemblyVersion>0.1.0.0</AssemblyVersion>
-    <FileVersion>0.1.0.0</FileVersion>
-    <InformationalVersion>0.1.0</InformationalVersion>
+    <Version>0.1.1</Version>
+    <AssemblyVersion>0.1.1.0</AssemblyVersion>
+    <FileVersion>0.1.1.0</FileVersion>
+    <InformationalVersion>0.1.1</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <DefaultItemExcludes>$(DefaultItemExcludes);tests\**</DefaultItemExcludes>
   </PropertyGroup>
