@@ -14,6 +14,64 @@ namespace WinScrcpy.Tests;
 
 public sealed class DiscoveryAndUiTests
 {
+    [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+    static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out int value, int size);
+
+    static bool IsAppCloaked(Form form)
+    {
+        Assert.Equal(0, DwmGetWindowAttribute(form.Handle, 14, out int value, sizeof(int)));
+        return (value & 1) != 0;
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MainForm_FirstFrameIsCloakedUntilLayoutCompletes(bool createHandleEarly)
+    {
+        StaRunner.Run(() =>
+        {
+            AppConfig cfg = AppConfig.CreateDefault();
+            using (MainForm form = new MainForm(new ConfigManager(Path.Combine(Path.GetTempPath(),
+                "winscrcpy_first_frame_" + Guid.NewGuid().ToString("N") + ".json")), cfg, null, false))
+            {
+                form.ShowInTaskbar = false;
+                bool loaded = false;
+                bool shown = false;
+                form.Load += delegate
+                {
+                    Assert.True(IsAppCloaked(form));
+                    loaded = true;
+                };
+                form.Shown += delegate
+                {
+                    Assert.True(loaded);
+                    Assert.False(IsAppCloaked(form));
+                    shown = true;
+                };
+                if (createHandleEarly)
+                {
+                    IntPtr handle = form.Handle;
+                    Assert.True(IsAppCloaked(form));
+                }
+                form.Show();
+                Assert.True(UiTestHelpers.PumpUntil(() => shown, 3000));
+                Rectangle area = Screen.FromControl(form).WorkingArea;
+                Assert.Equal(area.Left + Math.Max(0, (area.Width - form.Width) / 2), form.Left);
+                Assert.Equal(area.Top + Math.Max(0, (area.Height - form.Height) / 2), form.Top);
+
+                form.Hide();
+                form.Show();
+                Application.DoEvents();
+                Assert.False(IsAppCloaked(form));
+                typeof(Control).GetMethod("RecreateHandle", System.Reflection.BindingFlags.Instance
+                    | System.Reflection.BindingFlags.NonPublic).Invoke(form, null);
+                Application.DoEvents();
+                Assert.False(IsAppCloaked(form));
+                form.Close();
+            }
+        });
+    }
+
     [Fact]
     public async Task ProbeEndpointsAsync_CapsConcurrencyAvoidsThreadExplosionAndHonorsCancel()
     {

@@ -42,6 +42,17 @@ internal static class UiTheme
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, string lParam);
 
+    public static void SetWindowCloaked(IntPtr hwnd, bool cloaked)
+    {
+        if (hwnd == IntPtr.Zero) return;
+        try
+        {
+            int value = cloaked ? 1 : 0;
+            DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, ref value, sizeof(int));
+        }
+        catch (Exception) { }
+    }
+
     public static void PrepareDialogHandle(IntPtr hwnd)
     {
         if (hwnd == IntPtr.Zero) return;

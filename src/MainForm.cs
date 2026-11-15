@@ -37,6 +37,7 @@ internal sealed class MainForm : Form
     bool isActionBusy;
     bool isScanning;
     bool pendingInitialCenter;
+    bool initialDisplayComplete;
     bool isBusy { get { return isActionBusy || isScanning; } }
     readonly CancellationTokenSource formCts = new CancellationTokenSource();
     CancellationTokenSource activeScanCts;
@@ -236,13 +237,37 @@ internal sealed class MainForm : Form
 
     protected override void SetVisibleCore(bool value)
     {
-        if (value && !IsHandleCreated && StartPosition == FormStartPosition.CenterScreen)
+        if (value && !initialDisplayComplete && StartPosition == FormStartPosition.CenterScreen)
         {
             pendingInitialCenter = true;
             CenterInWorkingArea(Screen.FromPoint(Cursor.Position).WorkingArea);
             StartPosition = FormStartPosition.Manual;
         }
         base.SetVisibleCore(value);
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        // Keep intermediate positioning and DPI layout out of the first visible frame.
+        // A recreated handle after startup must remain visible without another Shown event.
+        if (!initialDisplayComplete) UiTheme.SetWindowCloaked(Handle, true);
+        base.OnHandleCreated(e);
+    }
+
+    protected override void OnShown(EventArgs e)
+    {
+        try
+        {
+            PerformLayout();
+            Refresh();
+        }
+        finally
+        {
+            initialDisplayComplete = true;
+            if (!IsDisposed && IsHandleCreated) UiTheme.SetWindowCloaked(Handle, false);
+        }
+        // Start device discovery only after the initial frame is ready to present.
+        base.OnShown(e);
     }
 
     protected override void OnLoad(EventArgs e)
